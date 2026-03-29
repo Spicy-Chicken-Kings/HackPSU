@@ -103,11 +103,14 @@ User wrote: {user_response}
 
 Rules:
 - Be specific to what they wrote
-- Do NOT give a high score for negative or meaningless responses. level_up should be assigned based 'False' in these cases.
+- Do NOT give a high score for negative or meaningless responses. level_up should be assigned 'False' in these cases.
+- For invalid responses:
+    Return EXACTLY this JSON format (no markdown, no explanations):
+    {{"score": 3, "message": "Your specific response here", "level_up": False}}
 - Keep message 1-2 sentences
 
 Return EXACTLY this JSON format (no markdown, no explanations):
-{{"score": 5, "message": "Your specific response here", "level_up": false}}
+{{"score": Your score here, "message": "Your specific response here", "level_up": True or False based on the score}}
 
 Score must be 1-10. Level_up should be true only if score >= 8.
 """

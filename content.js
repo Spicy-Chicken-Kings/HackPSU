@@ -798,28 +798,37 @@
       return;
     }
 
-    // ── 3. POSITIVE / NORMAL PATH ──────────────────────────────
-    S.promptsDone++;
-    S.usedIds.add(prompt.id);
-
-    if (isText && resp.length > 0) {
-      showFeedback(fb, fbMsg, 'Thinking… 🧠', 'loading');
-      try {
-        const r = await callBackend(resp, prompt.id);
-        showFeedback(fb, fbMsg, r?.message || rnd(MSGS.praise), 'good');
-        if (r?.level_up) { S.xp += (r.score || 7); checkLevel(); }
-        else addXP(4);
-      } catch {
-        showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
-        addXP(3);
-      }
-    } else {
-      showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
-      addXP(2);
-    }
-
-    saveStats();
-    setTimeout(() => dismissOverlay(), 3000);
+     // ── 3. POSITIVE / NORMAL PATH ──────────────────────────────
+     S.promptsDone++;
+     S.usedIds.add(prompt.id);
+ 
+     if (isText && resp.length > 0) {
+       showFeedback(fb, fbMsg, 'Thinking… 🧠', 'loading');
+       try {
+         const r = await callBackend(resp, prompt.id);
+         showFeedback(fb, fbMsg, r?.message || rnd(MSGS.praise), r?.level_up ? 'good' : 'warn');
+         if (r?.level_up) {
+           S.xp += (r.score || 7);
+           checkLevel();
+           saveStats();
+           setTimeout(() => dismissOverlay(), 3000);
+         } else {
+           addXP(4);
+           saveStats();
+           // prompt stays open for another try
+         }
+       } catch {
+         showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
+         addXP(3);
+         saveStats();
+         setTimeout(() => dismissOverlay(), 3000);
+       }
+     } else {
+       showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
+       addXP(2);
+       saveStats();
+       setTimeout(() => dismissOverlay(), 3000);
+     }
   }
 
   function showFeedback(area, msgEl, text, type) {

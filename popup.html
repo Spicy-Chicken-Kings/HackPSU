@@ -1,242 +1,273 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BrainPause</title>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,600;1,500&display=swap');
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>BrainPause</title>
+ <style>
+   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,600;1,500&display=swap');
 
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    :root {
-      --bg: #0e0e12;
-      --card: #16161e;
-      --border: #2a2a36;
-      --accent: #a78bfa;
-      --accent2: #34d399;
-      --text: #f0eff4;
-      --muted: #8b8a99;
-      --danger: #f87171;
-    }
+   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    body {
-      width: 320px;
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'DM Sans', sans-serif;
-      overflow: hidden;
-    }
 
-    .header {
-      padding: 20px 20px 0;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
+   :root {
+     --bg: #0e0e12;
+     --card: #16161e;
+     --border: #2a2a36;
+     --accent: #a78bfa;
+     --accent2: #34d399;
+     --text: #f0eff4;
+     --muted: #8b8a99;
+     --danger: #f87171;
+   }
 
-    .pet-mini {
-      width: 44px; height: 44px;
-      background: linear-gradient(135deg, #a78bfa22, #34d39922);
-      border: 1px solid var(--border);
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 22px;
-      animation: float 3s ease-in-out infinite;
-    }
 
-    @keyframes float {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-3px); }
-    }
+   body {
+     width: 320px;
+     background: var(--bg);
+     color: var(--text);
+     font-family: 'DM Sans', sans-serif;
+     overflow: hidden;
+   }
 
-    .header-text h1 {
-      font-family: 'Playfair Display', serif;
-      font-size: 18px;
-      font-weight: 600;
-      letter-spacing: -0.3px;
-    }
 
-    .header-text p {
-      font-size: 11px;
-      color: var(--muted);
-      margin-top: 1px;
-    }
+   .header {
+     padding: 20px 20px 0;
+     display: flex;
+     align-items: center;
+     gap: 12px;
+   }
 
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 3px 10px;
-      border-radius: 20px;
-      font-size: 11px;
-      font-weight: 500;
-      margin-left: auto;
-    }
-    .status-pill.active { background: #34d39920; color: var(--accent2); border: 1px solid #34d39940; }
-    .status-pill.inactive { background: #f8717120; color: var(--danger); border: 1px solid #f8717140; }
-    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-    .body { padding: 16px 20px 20px; }
+   .pet-mini {
+     width: 44px; height: 44px;
+     background: linear-gradient(135deg, #a78bfa22, #34d39922);
+     border: 1px solid var(--border);
+     border-radius: 50%;
+     display: flex; align-items: center; justify-content: center;
+     font-size: 22px;
+     animation: float 3s ease-in-out infinite;
+   }
 
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px;
-      margin-bottom: 10px;
-    }
 
-    .card-label {
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      color: var(--muted);
-      margin-bottom: 8px;
-      font-weight: 500;
-    }
+   @keyframes float {
+     0%, 100% { transform: translateY(0); }
+     50% { transform: translateY(-3px); }
+   }
 
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
 
-    .stat { text-align: center; }
-    .stat-val { font-size: 22px; font-weight: 600; color: var(--accent); }
-    .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 1px; }
+   .header-text h1 {
+     font-family: 'Playfair Display', serif;
+     font-size: 18px;
+     font-weight: 600;
+     letter-spacing: -0.3px;
+   }
 
-    .progress-bar {
-      height: 4px;
-      background: var(--border);
-      border-radius: 4px;
-      margin-top: 10px;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent), var(--accent2));
-      border-radius: 4px;
-      transition: width 0.5s ease;
-    }
 
-    .btn {
-      width: 100%;
-      padding: 11px;
-      border-radius: 10px;
-      border: none;
-      font-family: inherit;
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      margin-bottom: 8px;
-    }
-    .btn:last-child { margin-bottom: 0; }
+   .header-text p {
+     font-size: 11px;
+     color: var(--muted);
+     margin-top: 1px;
+   }
 
-    .btn-primary {
-      background: linear-gradient(135deg, var(--accent), #7c3aed);
-      color: white;
-    }
-    .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); }
 
-    .btn-ghost {
-      background: transparent;
-      color: var(--muted);
-      border: 1px solid var(--border);
-    }
-    .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+   .status-pill {
+     display: inline-flex;
+     align-items: center;
+     gap: 5px;
+     padding: 3px 10px;
+     border-radius: 20px;
+     font-size: 11px;
+     font-weight: 500;
+     margin-left: auto;
+   }
+   .status-pill.active { background: #34d39920; color: var(--accent2); border: 1px solid #34d39940; }
+   .status-pill.inactive { background: #f8717120; color: var(--danger); border: 1px solid #f8717140; }
+   .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
-    .btn-danger {
-      background: #f8717120;
-      color: var(--danger);
-      border: 1px solid #f8717130;
-    }
-    .btn-danger:hover { background: #f8717130; }
 
-    .no-session {
-      text-align: center;
-      padding: 20px 0;
-    }
-    .no-session p {
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.6;
-      margin-bottom: 16px;
-    }
+   .body { padding: 16px 20px 20px; }
 
-    .divider {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: 12px 0;
-    }
 
-    #msg {
-      font-size: 11px;
-      color: var(--accent2);
-      text-align: center;
-      min-height: 16px;
-      margin-top: 8px;
-    }
-  </style>
+   .card {
+     background: var(--card);
+     border: 1px solid var(--border);
+     border-radius: 12px;
+     padding: 14px;
+     margin-bottom: 10px;
+   }
+
+
+   .card-label {
+     font-size: 10px;
+     text-transform: uppercase;
+     letter-spacing: 0.8px;
+     color: var(--muted);
+     margin-bottom: 8px;
+     font-weight: 500;
+   }
+
+
+   .stat-row {
+     display: flex;
+     justify-content: space-between;
+     align-items: center;
+   }
+
+
+   .stat { text-align: center; }
+   .stat-val { font-size: 22px; font-weight: 600; color: var(--accent); }
+   .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 1px; }
+
+
+   .progress-bar {
+     height: 4px;
+     background: var(--border);
+     border-radius: 4px;
+     margin-top: 10px;
+     overflow: hidden;
+   }
+   .progress-fill {
+     height: 100%;
+     background: linear-gradient(90deg, var(--accent), var(--accent2));
+     border-radius: 4px;
+     transition: width 0.5s ease;
+   }
+
+
+   .btn {
+     width: 100%;
+     padding: 11px;
+     border-radius: 10px;
+     border: none;
+     font-family: inherit;
+     font-size: 13px;
+     font-weight: 500;
+     cursor: pointer;
+     transition: all 0.2s ease;
+     margin-bottom: 8px;
+   }
+   .btn:last-child { margin-bottom: 0; }
+
+
+   .btn-primary {
+     background: linear-gradient(135deg, var(--accent), #7c3aed);
+     color: white;
+   }
+   .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); }
+
+
+   .btn-ghost {
+     background: transparent;
+     color: var(--muted);
+     border: 1px solid var(--border);
+   }
+   .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+
+
+   .btn-danger {
+     background: #f8717120;
+     color: var(--danger);
+     border: 1px solid #f8717130;
+   }
+   .btn-danger:hover { background: #f8717130; }
+
+
+   .no-session {
+     text-align: center;
+     padding: 20px 0;
+   }
+   .no-session p {
+     font-size: 12px;
+     color: var(--muted);
+     line-height: 1.6;
+     margin-bottom: 16px;
+   }
+
+
+   .divider {
+     border: none;
+     border-top: 1px solid var(--border);
+     margin: 12px 0;
+   }
+
+
+   #msg {
+     font-size: 11px;
+     color: var(--accent2);
+     text-align: center;
+     min-height: 16px;
+     margin-top: 8px;
+   }
+ </style>
 </head>
 <body>
-  <div class="header">
-    <div class="pet-mini">🧠</div>
-    <div class="header-text">
-      <h1>BrainPause</h1>
-      <p>Mindful scrolling companion</p>
-    </div>
-    <div id="status-pill" class="status-pill inactive">
-      <span class="status-dot"></span>
-      <span id="status-text">Off</span>
-    </div>
-  </div>
+ <div class="header">
+   <div class="pet-mini">🧠</div>
+   <div class="header-text">
+     <h1>BrainPause</h1>
+     <p>Mindful scrolling companion</p>
+   </div>
+   <div id="status-pill" class="status-pill inactive">
+     <span class="status-dot"></span>
+     <span id="status-text">Off</span>
+   </div>
+ </div>
 
-  <div class="body">
-    <!-- Active session view -->
-    <div id="session-view" style="display:none">
-      <div class="card">
-        <div class="card-label">Session Stats</div>
-        <div class="stat-row">
-          <div class="stat">
-            <div class="stat-val" id="stat-time">0m</div>
-            <div class="stat-lbl">Time active</div>
-          </div>
-          <div class="stat">
-            <div class="stat-val" id="stat-prompts">0</div>
-            <div class="stat-lbl">Prompts done</div>
-          </div>
-          <div class="stat">
-            <div class="stat-val" id="stat-level">1</div>
-            <div class="stat-lbl">Pet level</div>
-          </div>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill" id="level-progress" style="width: 20%"></div>
-        </div>
-      </div>
 
-      <div class="card">
-        <div class="card-label">Next Prompt In</div>
-        <div class="stat-val" id="next-prompt-time" style="font-size:28px">—</div>
-      </div>
+ <div class="body">
+   <!-- Active session view -->
+   <div id="session-view" style="display:none">
+     <div class="card">
+       <div class="card-label">Session Stats</div>
+       <div class="stat-row">
+         <div class="stat">
+           <div class="stat-val" id="stat-time">0m</div>
+           <div class="stat-lbl">Time active</div>
+         </div>
+         <div class="stat">
+           <div class="stat-val" id="stat-prompts">0</div>
+           <div class="stat-lbl">Prompts done</div>
+         </div>
+         <div class="stat">
+           <div class="stat-val" id="stat-level">1</div>
+           <div class="stat-lbl">Pet level</div>
+         </div>
+       </div>
+       <div class="progress-bar">
+         <div class="progress-fill" id="level-progress" style="width: 20%"></div>
+       </div>
+     </div>
 
-      <button class="btn btn-ghost" id="btn-pause">Pause Session</button>
-      <button class="btn btn-danger" id="btn-stop">End Session</button>
-    </div>
 
-    <!-- No session view -->
-    <div id="no-session-view">
-      <div class="no-session">
-        <p>Open Instagram to start a<br>mindful browsing session.</p>
-      </div>
-      <button class="btn btn-primary" id="btn-open-ig">Open Instagram</button>
-    </div>
+     <div class="card">
+       <div class="card-label">Next Prompt In</div>
+       <div class="stat-val" id="next-prompt-time" style="font-size:28px">—</div>
+     </div>
 
-    <div id="msg"></div>
-  </div>
 
-  <script src="popup.js"></script>
+     <button class="btn btn-ghost" id="btn-pause">Pause Session</button>
+     <button class="btn btn-danger" id="btn-stop">End Session</button>
+   </div>
+
+
+   <!-- No session view -->
+   <div id="no-session-view">
+     <div class="no-session">
+       <p>Open Instagram to start a<br>mindful browsing session.</p>
+     </div>
+     <button class="btn btn-primary" id="btn-open-ig">Open Instagram</button>
+   </div>
+
+
+   <div id="msg"></div>
+ </div>
+
+
+ <script src="popup.js"></script>
 </body>
 </html>
+
+
+
