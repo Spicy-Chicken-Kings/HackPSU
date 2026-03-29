@@ -1,0 +1,130 @@
+# 🧠 BrainPause — Browser Extension
+
+> Mindful breaks from doomscrolling. Your brain deserves better.
+
+---
+
+## What it does
+
+BrainPause is a Chrome/Firefox extension that sits on Instagram and:
+
+- **Detects doomscrolling** (fast scrolling, low engagement)
+- **Triggers mindful prompt overlays** at timed intervals (which halve after each prompt)
+- **Gradually desaturates** the Instagram feed to make it look duller over time
+- **Brain Pet** — a cute animated brain lives in the corner, pops up randomly with comments, levels up with you
+- **AI-validates** your written responses via the Python backend (Claude API)
+
+---
+
+## Extension File Structure
+
+```
+brainpause/
+├── manifest.json        ← Chrome MV3 manifest
+├── background.js        ← Service worker (alarm management)
+├── content.js           ← Main logic injected into Instagram
+├── styles.css           ← All injected UI styles
+├── popup.html           ← Extension icon popup (status/controls)
+├── popup.js             ← Popup logic
+└── backend/
+    ├── app.py           ← Flask API (AI validation + feed scanning)
+    └── requirements.txt
+```
+
+---
+
+## Install the Extension
+
+### Chrome
+1. Open `chrome://extensions`
+2. Enable **Developer Mode** (top right toggle)
+3. Click **Load unpacked**
+4. Select the `brainpause/` folder (the one with `manifest.json`)
+
+### Firefox (for testing)
+1. Open `about:debugging`
+2. Click **This Firefox → Load Temporary Add-on**
+3. Select `manifest.json`
+
+---
+
+## Run the Backend (Optional — for AI features)
+
+The backend powers:
+- **Prompt validation**: Claude evaluates your written responses and gives encouraging feedback
+- **Feed scanning**: Analyzes visible captions for mental wellness concerns
+
+```bash
+cd backend/
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY="your-api-key-here"
+python app.py
+```
+
+The server starts on `http://localhost:5000`.
+
+> **Without the backend running**, the extension still works fully — AI features fall back to local encouraging messages.
+
+---
+
+## How It Works
+
+### Session Modes
+| Mode | Behavior |
+|------|----------|
+| **Timer** | First prompt after N minutes (your choice). Each subsequent prompt comes in at half the previous interval (e.g., 5m → 2.5m → 1.25m → min 15s) |
+| **Doomscroll Detection** | Prompts fire when fast scrolling + low engagement are detected, or at the 1-hour session limit |
+
+### Brain Pet
+- Lives in the bottom-right corner
+- Randomly pops up with comments:
+  - `"Speedy much? 🏎️"` — fast scrolling detected
+  - `"Feeling shy? 👀"` — not liking/commenting
+  - `"What's the buzz? 🐝"` — general check-in
+- Levels up when AI rates your responses highly (score ≥ 7)
+- Guides you through every prompt overlay
+
+### Grayscale / Desaturation
+- Feed gradually desaturates every 30 seconds
+- Goes from full color → ~55% saturation + slightly dimmer
+- Resets when session ends
+
+### Mindful Prompts
+1. 🫁 **Breathe With Me** — animated breathing circle
+2. ✨ **Gratitude Check** — write what you're grateful for
+3. 🏃 **Move Your Body** — 5 jumping jacks (or accessible alt)
+4. 👁️ **20-20 Eye Break** — countdown timer
+5. 🌿 **5 Senses Check-In** — grounding exercise
+6. 💧 **Hydration Break** — go drink water
+7. 🌟 **Offline Highlight** — best offline moment
+8. 📖 **Six Word Story** — describe your day in 6 words
+9. 😅 **Comic Relief** — minor annoyance you overreact to
+10. 🏆 **Proud Moment** — something you're proud of
+11. ✈️ **Dream Destination** — where you'd love to travel
+
+---
+
+## Backend API Endpoints
+
+### `POST /validate-prompt`
+```json
+// Request
+{ "response": "I'm grateful for my morning coffee ☕", "prompt_type": "gratitude" }
+
+// Response
+{ "score": 8, "message": "That morning ritual sounds grounding! ☕💜", "level_up": true }
+```
+
+### `POST /scan-feed`
+```json
+// Request
+{ "content": ["Caption 1…", "Caption 2…"] }
+
+// Response
+{ "concerning_count": 2, "categories": ["comparison", "FOMO"], "recommendation": "Consider muting accounts that trigger comparison." }
+```
+
+### `GET /health`
+```json
+{ "status": "ok", "service": "BrainPause API" }
+```
