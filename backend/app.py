@@ -1,37 +1,22 @@
 """
-BrainPause — Python Flask Backend (Google AI Studio / Gemini)
-Handles:
-  - /validate-prompt  : AI evaluation of user's mindful response
-  - /scan-feed        : Analyze scraped feed text for mindfulness concerns
-
-Setup:
-  pip install flask flask-cors google-generativeai
-  export GEMINI_API_KEY="your-google-ai-studio-key"
-  python app.py
+BrainPause — Python Flask Backend (Gemini API - UPDATED)
 """
 
 import json
 import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import google.generativeai as genai
+from google import genai
+
+# Initialize client (uses GEMINI_API_KEY from environment)
+client = genai.Client()
 
 app = Flask(__name__)
 CORS(app, origins=["https://www.instagram.com", "chrome-extension://*"])
-genai.configure(api_key="AIzaSyD69YeTVPmu0B2o9njpJmq-T_gDk9T0l_M")
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config=genai.GenerationConfig(
-        temperature=0.7,
-        max_output_tokens=300,
-    )
-)
+
 
 # ---------------------------------------------------------------------------
 # POST /validate-prompt
-# Body: { "response": str, "prompt_type": str }
-# Returns: { "score": int, "message": str, "level_up": bool }
 # ---------------------------------------------------------------------------
 @app.route("/validate-prompt", methods=["POST"])
 def validate_prompt():
@@ -46,48 +31,57 @@ def validate_prompt():
             "level_up": False
         })
 
-    system = (
-        "You are the BrainPause Brain Pet, a warm and encouraging mindfulness companion. "
-        "Your job is to evaluate a user's response to a mindful prompt and give a short, "
-        "genuine, uplifting message (1-2 sentences max). Be specific to what they wrote — "
-        "no generic filler. Score thoughtfulness 1–10. Only set level_up=true if the "
-        "response shows real self-reflection (score >= 7). "
-        "RESPOND ONLY WITH VALID JSON, no markdown, no preamble."
-    )
+    prompt = f"""
+You are the BrainPause Brain Pet, a warm and encouraging mindfulness companion.
+Evaluate the user's response and return JSON only. Do not give a good score if the response is negative or not comprehendable. Integrate the user's response into the message. 
 
-    user_msg = (
-        f"Prompt type: {prompt_type}\n"
-        f"User wrote: {user_response}\n\n"
-        'Return JSON: {"score": <1-10>, "message": "<encouraging 1-2 sentence response>", "level_up": <true/false>}'
-    )
+Prompt type: {prompt_type}
+User wrote: {user_response}
+
+Return JSON:
+{{
+  "score": <1-10>,
+  "message": "<1-2 sentence encouraging response>",
+  "level_up": <true/false>
+}}
+"""
 
     try:
-        full_prompt = f"{system}\n\n{user_msg}"
-        response = model.generate_content(full_prompt)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 300,
+            }
+        )
+
         raw = response.text.strip()
-        # Strip possible markdown fences
+
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+
         result = json.loads(raw)
-        # Sanitize
-        result["score"]    = int(result.get("score", 5))
+
+        result["score"] = int(result.get("score", 5))
         result["level_up"] = bool(result.get("level_up", False))
-        result["message"]  = str(result.get("message", "Nice reflection! 💜"))
+        result["message"] = str(result.get("message", "Nice reflection! 💜"))
+
         return jsonify(result)
 
-    except json.JSONDecodeError:
-        return jsonify({"score": 5, "message": "Love the reflection! 💜", "level_up": False})
     except Exception as e:
         app.logger.error("Gemini API error: %s", e)
-        return jsonify({"score": 5, "message": "Great work! 🌟", "level_up": False}), 200
+        return jsonify({
+            "score": 5,
+            "message": "Great work! 🌟",
+            "level_up": False
+        })
 
 
 # ---------------------------------------------------------------------------
 # POST /scan-feed
-# Body: { "content": ["post text 1", "caption 2", ...] }
-# Returns: { "concerning_count": int, "categories": [...], "recommendation": str }
 # ---------------------------------------------------------------------------
 @app.route("/scan-feed", methods=["POST"])
 def scan_feed():
@@ -101,32 +95,47 @@ def scan_feed():
             "recommendation": "Nothing to scan yet."
         })
 
-    # Limit to first 15 items to keep prompt small
     sample = feed_items[:15]
     content_str = "\n---\n".join(str(s) for s in sample)
 
-    system = (
-        "You are a mindfulness feed analyst. Analyze the provided social media feed captions "
-        "for content that could negatively impact mental wellbeing: comparison culture, "
-        "anxiety-inducing news, body image issues, FOMO, political stress, etc. "
-        "Be concise and practical. "
-        "RESPOND ONLY WITH VALID JSON, no markdown."
-    )
+    prompt = f"""
+You are a mindfulness feed analyst.
 
-    user_msg = (
-        f"Feed content:\n{content_str}\n\n"
-        'Return JSON: {"concerning_count": <int>, "categories": ["<concern type>", ...], '
-        '"recommendation": "<one sentence suggestion for a more mindful feed>"}'
-    )
+Analyze this social media feed for harmful patterns like:
+- comparison culture
+- anxiety-inducing news
+- body image issues
+- FOMO
+- political stress
+
+Feed:
+{content_str}
+
+Return JSON:
+{{
+  "concerning_count": <int>,
+  "categories": ["<type>", ...],
+  "recommendation": "<one sentence suggestion>"
+}}
+"""
 
     try:
-        full_prompt = f"{system}\n\n{user_msg}"
-        response = model.generate_content(full_prompt)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 300,
+            }
+        )
+
         raw = response.text.strip()
+
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+
         result = json.loads(raw)
         return jsonify(result)
 
@@ -136,7 +145,7 @@ def scan_feed():
             "concerning_count": 0,
             "categories": [],
             "recommendation": "Your feed looks alright — stay mindful!"
-        }), 200
+        })
 
 
 # ---------------------------------------------------------------------------
