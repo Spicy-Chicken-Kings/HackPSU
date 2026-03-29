@@ -1,1030 +1,911 @@
 // ============================================================
-//  BrainPause — Content Script (instagram.com)
-//  Mindful scrolling companion
+//  BrainPause v3 — content.js
+//  Injected into instagram.com
 // ============================================================
-
 (function () {
   'use strict';
+  if (window.__bp3) return;
+  window.__bp3 = true;
 
-  // ── Prevent double-injection ────────────────────────────────
-  if (window.__brainpause_loaded) return;
-  window.__brainpause_loaded = true;
+  const BACKEND = 'http://localhost:5000';
 
-  // ── Backend URL ─────────────────────────────────────────────
-  const API = 'http://localhost:5000';
+  // ─────────────────────────────────────────────────────────────
+  //  GLOBAL STATE
+  // ─────────────────────────────────────────────────────────────
+  const S = {
+    running: false,
+    paused:  false,
+    cfg:     null,           // { mode, intervalMin, sessionMin }
 
-  // ── State ───────────────────────────────────────────────────
-  const BP = {
-    active: false,
-    paused: false,
-    settings: null,
+    // interval halving
+    intervalMs:    120_000,
+    minIntervalMs:  15_000,
+    promptTimer:   null,
+    cdVal:         0,
+    cdInterval:    null,
 
-    // Timing
-    intervalMs: 120000,        // current interval (halves after each prompt)
-    minIntervalMs: 15000,      // floor: 15 seconds
-    promptTimerId: null,
-    sessionEndTimerId: null,
-    countdownVal: 0,
-    countdownTimer: null,
+    // grayscale
+    sat:  1.0,
+    bri:  1.0,
+    gsStep: 0,
+    gsTimer: null,
 
-    // Grayscale / desaturation
-    saturation: 1.0,           // starts full color
-    brightness: 1.0,
-    grayscaleTimer: null,
-    grayscaleComplete: false,  // once true, feed stays gray for the session
+    // scroll
+    prevY:     0,
+    prevT:     Date.now(),
+    velBuf:    [],           // rolling 15-sample velocity buffer
+    fastBurst: 0,
+    slowStreak: 0,
 
-    // Scroll tracking
-    lastScrollY: 0,
-    lastScrollTime: Date.now(),
-    scrollVelocity: 0,
-    scrollSamples: [],
-    fastScrollCount: 0,
-
-    // Engagement tracking
+    // engagement
     likeCount: 0,
-    commentCount: 0,
-    lastEngagementCheck: Date.now(),
-    engagementWarned: false,
+    engTimer:  null,
+    engWarn:   false,
+    engReset:  Date.now(),
 
-    // Session stats
-    promptCount: 0,
+    // xp / level
+    xp:    0,
     level: 1,
-    xp: 0,
+    promptsDone: 0,
     sessionStart: null,
 
-    // UI refs
-    setupEl: null,
-    overlayEl: null,
-    petEl: null,
-    feedFilter: null,
+    // pet
+    petBubbleTimer: null,
+    petRandTimer:   null,
 
-    // Pet state
-    petShown: false,
-    petTimerId: null,
-    petHideTimerId: null,
-    petLevel: 1,
-
-    // Prompts
-    usedPromptIds: new Set(),
-    activePromptId: null,
+    // prompts
+    usedIds: new Set(),
   };
 
-  // ── Prompt Definitions ──────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  //  NEGATIVE WORD LIST  (local sentiment guard)
+  // ─────────────────────────────────────────────────────────────
+  const NEG_WORDS = new Set([
+    'nothing','none','nobody','hate','hated','hating',
+    'terrible','awful','horrible','awful','dreadful',
+    'sad','depressed','depressing','depression',
+    'miserable','misery','worthless','hopeless',
+    'lonely','alone','angry','anger','upset',
+    'bad','worst','disgusting','pathetic','useless',
+    'boring','bored','empty','pointless','meaningless',
+    'stupid','dumb','idiot','fail','failure','failed',
+    'ugly','gross','sick','suck','sucks','sucked',
+    'tired','exhausted','numb','hurt','hurting','pain',
+  ]);
+
+  function isNegative(text) {
+    const words = text.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
+    const hits = words.filter(w => NEG_WORDS.has(w)).length;
+    return hits >= 1;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  PROMPTS
+  // ─────────────────────────────────────────────────────────────
   const PROMPTS = [
     {
-      id: 'breathe',
-      title: 'Breathe With Me',
-      emoji: '🫁',
+      id: 'breathe', title: 'Breathe With Me', emoji: '🫁',
       type: 'breathing',
-      desc: 'Take a mindful breath. Follow the circle.',
+      desc: 'Let\'s slow down together. Follow the circle.',
+      petLine: 'Deep breaths reset everything. You deserve this moment 🌸',
     },
     {
-      id: 'gratitude',
-      title: 'Gratitude Check',
-      emoji: '✨',
+      id: 'gratitude', title: 'Gratitude Check', emoji: '✨',
       type: 'write',
-      prompt: 'Write something you\'re grateful for right now:',
-      placeholder: 'I\'m grateful for…',
+      q: 'Write something you\'re grateful for right now:',
+      ph: 'I\'m grateful for…',
+      petLine: 'Even tiny things count — a warm drink, a good song, sunlight ☀️',
     },
     {
-      id: 'physical',
-      title: 'Move Your Body',
-      emoji: '🏃',
+      id: 'physical', title: 'Move Your Body', emoji: '🏃',
       type: 'physical',
-      primary: 'Do 5 jumping jacks!',
-      primaryIcon: '🤸',
-      alt: 'Can\'t jump right now? Stretch both arms above your head and hold for 10 seconds.',
+      mainText: 'Do 5 jumping jacks!', mainIcon: '🤸',
+      altText: 'Stretch both arms above your head and hold for 10 seconds.',
       altIcon: '🙆',
+      petLine: 'Movement is medicine! Your body will thank you 💪',
     },
     {
-      id: 'eye_rest',
-      title: '20-20 Eye Break',
-      emoji: '👁️',
-      type: 'countdown',
-      prompt: 'Look at something 20 feet away.',
-      duration: 20,
+      id: 'eye_rest', title: '20-20 Eye Break', emoji: '👁️',
+      type: 'countdown', duration: 20,
+      q: 'Look at something about 20 feet away.',
+      petLine: 'Your eyes work so hard scrolling all day. Give them a rest! 🌿',
     },
     {
-      id: '5_senses',
-      title: '5 Senses Check-In',
-      emoji: '🌿',
+      id: 'senses', title: '5 Senses Check-In', emoji: '🌿',
       type: 'senses',
-      prompt: 'Ground yourself. Name one thing for each sense:',
+      q: 'Ground yourself. Name one thing for each sense:',
       senses: [
-        { icon: '👀', label: 'See' },
-        { icon: '👂', label: 'Hear' },
-        { icon: '✋', label: 'Touch' },
-        { icon: '👃', label: 'Smell' },
-        { icon: '👅', label: 'Taste' },
+        { icon: '👀', lbl: 'See'   },
+        { icon: '👂', lbl: 'Hear'  },
+        { icon: '✋', lbl: 'Touch' },
+        { icon: '👃', lbl: 'Smell' },
+        { icon: '👅', lbl: 'Taste' },
       ],
+      petLine: 'This is grounding magic. You\'re here, right now 🌱',
     },
     {
-      id: 'hydration',
-      title: 'Hydration Break',
-      emoji: '💧',
-      type: 'acknowledge',
-      prompt: 'Your brain is 75% water.',
-      sub: 'Go grab a sip — we\'ll be here when you\'re back.',
-      cta: 'I took a sip! 💧',
+      id: 'hydration', title: 'Hydration Break', emoji: '💧',
+      type: 'ack',
+      q: 'Your brain is 75% water.',
+      sub: 'Go grab a sip — I\'ll be right here when you\'re back.',
+      cta: 'I drank some water! 💧',
+      petLine: 'Hydration = better mood, sharper focus, more energy! 💜',
     },
     {
-      id: 'offline_win',
-      title: 'Offline Highlight',
-      emoji: '🌟',
+      id: 'offline_win', title: 'Offline Highlight', emoji: '🌟',
       type: 'write',
-      prompt: 'What\'s the best thing that happened to you today — offline?',
-      placeholder: 'Something nice today…',
+      q: 'What\'s the best thing that happened to you today — offline?',
+      ph: 'Something nice today…',
+      petLine: 'Real life has the best moments. Tell me one! 🌞',
     },
     {
-      id: 'six_words',
-      title: 'Six Word Story',
-      emoji: '📖',
-      type: 'six_words',
-      prompt: 'Describe your day in exactly 6 words:',
-      placeholder: 'Word 1, Word 2…',
+      id: 'six_words', title: 'Six Word Story', emoji: '📖',
+      type: 'sixwords',
+      q: 'Describe your day in exactly 6 words:',
+      ph: 'e.g. Woke up, smiled, kept going…',
+      petLine: 'Six words, one whole mood. Let\'s hear it 📝',
     },
     {
-      id: 'minor_annoyance',
-      title: 'Comic Relief',
-      emoji: '😅',
+      id: 'annoyance', title: 'Comic Relief', emoji: '😅',
       type: 'write',
-      prompt: 'What\'s a minor thing that annoys you way more than it should?',
-      placeholder: 'The thing that gets me is…',
+      q: 'What\'s a minor thing that bothers you way more than it should?',
+      ph: 'The thing that gets me is…',
+      petLine: 'Laughing at small stuff is underrated therapy 😄',
     },
     {
-      id: 'proud',
-      title: 'Proud Moment',
-      emoji: '🏆',
+      id: 'proud', title: 'Proud Moment', emoji: '🏆',
       type: 'write',
-      prompt: 'What\'s something you\'ve done recently that you\'re proud of?',
-      placeholder: 'Recently I…',
+      q: 'What\'s something you\'ve done recently that you\'re proud of?',
+      ph: 'Recently I…',
+      petLine: 'You\'ve done something worth celebrating. Find it! 🎉',
     },
     {
-      id: 'travel_dream',
-      title: 'Dream Destination',
-      emoji: '✈️',
+      id: 'travel', title: 'Dream Destination', emoji: '✈️',
       type: 'write',
-      prompt: 'Where in the world do you most want to visit? Why?',
-      placeholder: 'I want to go to…',
+      q: 'Where in the world do you most want to visit? Why?',
+      ph: 'I want to go to…',
+      petLine: 'Dream big! Every journey starts with a single thought 🗺️',
     },
   ];
 
-  // ── Pet Messages ────────────────────────────────────────────
-  const PET_MSGS = {
-    fast: ['Speedy much? 🏎️', 'Whoa, slow down!', 'Going somewhere? 🚀', 'Easy there, racer!'],
-    low_engage: ['Feeling shy? 👀', 'Not liking much today?', 'Just passing through?', 'Invisible mode on?'],
-    general: ['What\'s the buzz? 🐝', 'Still here? 👋', 'How\'s the feed treating you?', 'You good? 😊', 'Taking it all in~', 'Heyyyy 👀'],
-    level_up: ['Level up! ⬆️✨', 'You\'re growing! 🌱', 'Love the reflection! 💜'],
+  // ─────────────────────────────────────────────────────────────
+  //  PET MESSAGES
+  // ─────────────────────────────────────────────────────────────
+  const MSGS = {
+    fast:     ['Speedy much? 🏎️', 'Whoa, slow down!', 'Is something chasing you? 🚀', 'Easy there, racer!', 'Fingers flying! 👀'],
+    shy:      ['Don\'t be shy! 💗', 'Nothing catching your eye?', 'Give a post some love! ❤️', 'Interact a little! 😊', 'Like something! Go on 😄'],
+    slowEnj:  ['Enjoying what you see? 🌸', 'Taking it all in~ ✨', 'Love the energy! 💕', 'Good vibes only 🌟'],
+    rand:     ['What\'s the buzz? 🐝', 'Hey there! 👋', 'How\'s the feed?', 'Still with me? 😊', 'You\'re doing great 💜', 'Heyyyy 🌸', 'Peek-a-boo! 👀'],
+    lvlUp:    ['Level up! ⬆️✨', 'You\'re growing! 🌱', 'Love that reflection! 💜', 'Look at you go! 🎉'],
+    empty:    ['Don\'t forget to respond! I\'m listening 🌸', 'Take a moment — what comes to mind? 💭', 'Your thoughts matter! Give it a try ✏️', 'Even one word counts 💜'],
+    negative: [
+      'It\'s okay — even hard days have a tiny bright spot 🌤️ Try again?',
+      'Rough day? That\'s totally valid. You still showed up — that counts 💜',
+      'Sending you love 💗 Can you find one small positive thing?',
+      'Be gentle with yourself. What\'s one thing going okay right now?',
+      'You deserve kindness — especially from yourself 🌸 Want to try again?',
+      'Hard times pass. What\'s one tiny thing you can appreciate? ✨',
+    ],
+    praise:   ['Love that reflection! 💜', 'That\'s beautiful 🌟', 'So thoughtful 🧠', 'Really lovely! ✨', 'You\'re doing amazing! 🎉', 'Worth remembering 💡', 'Wonderful! 💗', 'You\'ve got this ⭐'],
   };
 
-  // ── Utilities ───────────────────────────────────────────────
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-
-  function rand(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+  function rnd(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  const qs  = (s, r = document) => r.querySelector(s);
+  const qsa = (s, r = document) => [...r.querySelectorAll(s)];
 
-  function formatSeconds(s) {
-    if (s >= 60) return Math.floor(s / 60) + 'm ' + (s % 60).toString().padStart(2, '0') + 's';
-    return s + 's';
+  // ─────────────────────────────────────────────────────────────
+  //  BRAIN SVG  — pink, detailed
+  // ─────────────────────────────────────────────────────────────
+  // size: 'pet' (big sidebar) | 'prompt' (in overlay) | 'mini' (validation row)
+  function brainSVG(size) {
+    const W = size === 'pet' ? 120 : size === 'prompt' ? 76 : 42;
+    const uid = size + Math.random().toString(36).slice(2, 6);
+    return `
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"
+  class="bp-brain bp-brain-${size}" width="${W}" height="${W}">
+  <defs>
+    <radialGradient id="g1-${uid}" cx="50%" cy="45%" r="55%">
+      <stop offset="0%"   stop-color="#ffe4ec"/>
+      <stop offset="100%" stop-color="#ff8fab"/>
+    </radialGradient>
+    <radialGradient id="g2-${uid}" cx="30%" cy="30%" r="60%">
+      <stop offset="0%"   stop-color="#ffc2d1" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ff4d6d" stop-opacity="0.3"/>
+    </radialGradient>
+    <filter id="gs-${uid}">
+      <feGaussianBlur stdDeviation="2.8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Soft halo -->
+  <ellipse cx="60" cy="65" rx="50" ry="46" fill="#ff8fab" opacity="0.08"/>
+
+  <!-- Brain body -->
+  <path d="M60 98
+    C28 98 11 79 11 57
+    C11 36 29 18 49 17
+    C52 17 55 18 57 19.5
+    C55 13 50 7 50 7
+    C68 4 77 22 71 35
+    C79 29 91 33 92 46
+    C101 43 111 53 108 67
+    C105 80 93 88 79 91
+    C76 95 69 98 60 98Z"
+    fill="url(#g1-${uid})" filter="url(#gs-${uid})"/>
+
+  <!-- Right lobe shade -->
+  <path d="M60 98
+    C37 94 24 80 21 66
+    C18 52 27 41 40 36
+    C37 50 44 64 55 70
+    C51 78 54 90 60 98Z"
+    fill="url(#g2-${uid})" opacity="0.65"/>
+
+  <!-- Highlight top -->
+  <path d="M51 21 Q67 17 80 29"
+    stroke="#fff0f3" stroke-width="5.5" fill="none"
+    stroke-linecap="round" opacity="0.55"/>
+
+  <!-- Brain folds -->
+  <path d="M44 31 Q57 39 53 54" stroke="#c9184a" stroke-width="2.2"   fill="none" opacity="0.42" stroke-linecap="round"/>
+  <path d="M69 29 Q77 44 67 57" stroke="#c9184a" stroke-width="2.2"   fill="none" opacity="0.42" stroke-linecap="round"/>
+  <path d="M27 60 Q40 68 33 79" stroke="#c9184a" stroke-width="2"     fill="none" opacity="0.35" stroke-linecap="round"/>
+  <path d="M84 50 Q93 63 84 72" stroke="#c9184a" stroke-width="2"     fill="none" opacity="0.38" stroke-linecap="round"/>
+  <path d="M30 48 Q60 54 88 47" stroke="#c9184a" stroke-width="1.6"   fill="none" opacity="0.28" stroke-linecap="round"/>
+
+  <!-- White eyes -->
+  <circle cx="45" cy="63" r="10"  fill="white"   filter="url(#gs-${uid})"/>
+  <circle cx="75" cy="63" r="10"  fill="white"   filter="url(#gs-${uid})"/>
+  <!-- Pupils -->
+  <circle cx="46" cy="64" r="6.2" fill="#1a0010" class="bp-pl"/>
+  <circle cx="76" cy="64" r="6.2" fill="#1a0010" class="bp-pr"/>
+  <!-- Shine -->
+  <circle cx="48.5" cy="61.5" r="2.2" fill="white"/>
+  <circle cx="78.5" cy="61.5" r="2.2" fill="white"/>
+
+  <!-- Top lashes -->
+  <path d="M37 56 Q45 51 53 56" stroke="#c9184a" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.9"/>
+  <path d="M67 56 Q75 51 83 56" stroke="#c9184a" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- Smile -->
+  <path d="M48 80 Q60 92 72 80"
+    stroke="#c9184a" stroke-width="3" fill="none"
+    stroke-linecap="round" class="bp-mouth"/>
+
+  <!-- Rosy cheeks -->
+  <ellipse cx="32"  cy="73" rx="8"  ry="5"  fill="#ff4d6d" opacity="0.22"/>
+  <ellipse cx="88"  cy="73" rx="8"  ry="5"  fill="#ff4d6d" opacity="0.22"/>
+
+  <!-- Floating heart -->
+  <text x="60" y="13" font-size="12" text-anchor="middle" class="bp-hrt">💗</text>
+</svg>`;
   }
 
-  // ── Feed Filter (Desaturation) ──────────────────────────────
-  function initFeedFilter() {
-    const style = document.createElement('style');
-    style.id = 'bp-filter-style';
-    style.textContent = `
-      body { 
-        filter: saturate(1) brightness(1) !important;
-        transition: filter 2s ease !important;
+  // ─────────────────────────────────────────────────────────────
+  //  GRAYSCALE  — targets only feed media
+  // ─────────────────────────────────────────────────────────────
+  function initGrayscale() {
+    let el = document.getElementById('bp-gs');
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'bp-gs';
+      document.head.appendChild(el);
+    }
+    applyGrayscale();
+  }
+
+  function applyGrayscale() {
+    const el = document.getElementById('bp-gs');
+    if (!el) return;
+    // Target IG feed images & videos but exclude our own UI
+    el.textContent = `
+      article img:not(.bp-brain *),
+      article video,
+      ._aagv img, ._aagv video,
+      ._ac7v img, ._ac7v video,
+      [role="main"] img:not(#bp-pet img):not(#bp-overlay img):not(#bp-setup img),
+      [role="main"] video {
+        filter: saturate(${S.sat.toFixed(3)}) brightness(${S.bri.toFixed(3)}) !important;
+        transition: filter 6s ease !important;
       }
     `;
-    document.head.appendChild(style);
   }
 
-  function updateFeedFilter() {
-    const style = $('#bp-filter-style');
-    if (!style) return;
-    // 1.2s transition per tick gives a smooth, continuous desaturation feel.
-    // On reset (saturation=1) use a slightly longer ease so color "breathes" back in.
-    const transition = (BP.saturation >= 1.0 && BP.brightness >= 1.0) ? '2s ease' : '1.2s linear';
-    style.textContent = `
-      body { 
-        filter: saturate(${BP.saturation}) brightness(${BP.brightness}) !important;
-        transition: filter ${transition} !important;
+  function restoreGrayscale() {
+    const el = document.getElementById('bp-gs');
+    if (el) el.textContent = '';
+  }
+
+  function tickGrayscale() {
+    if (!S.running) return;
+    S.gsStep++;
+    // 1.0 → 0.40 sat over ~30 steps (every 20 s ≈ 10 min); 1.0 → 0.87 bri
+    S.sat = clamp(1.0 - S.gsStep * 0.02,  0.40, 1.0);
+    S.bri = clamp(1.0 - S.gsStep * 0.0045, 0.87, 1.0);
+    applyGrayscale();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  SCROLL TRACKING
+  // ─────────────────────────────────────────────────────────────
+  function initScroll() {
+    const onScroll = () => {
+      if (!S.running || S.paused) return;
+      const now = Date.now();
+      const dt  = Math.max(1, now - S.prevT);
+      const vel = (Math.abs(window.scrollY - S.prevY) / dt) * 1000; // px/s
+      S.prevY = window.scrollY;
+      S.prevT = now;
+
+      S.velBuf.push(vel);
+      if (S.velBuf.length > 15) S.velBuf.shift();
+      const avg = S.velBuf.reduce((a, b) => a + b, 0) / S.velBuf.length;
+
+      if (avg > 850) {
+        S.fastBurst++;
+        S.slowStreak = 0;
+        if (S.fastBurst >= 5) {
+          S.fastBurst = 0;
+          petSay(rnd(MSGS.fast));
+          if (S.cfg?.mode === 'doomscroll')
+            S.intervalMs = Math.max(S.minIntervalMs, Math.floor(S.intervalMs * 0.65));
+        }
+      } else if (avg < 180 && vel > 10) {
+        S.fastBurst = 0;
+        S.slowStreak++;
+        if (S.slowStreak >= 12 && S.likeCount > 0) {
+          S.slowStreak = 0;
+          petSay(rnd(MSGS.slowEnj));
+        }
       }
-    `;
-  }
-
-  // Smoothly desaturate the feed over `durationMs`, reaching full gray when time is up.
-  function startGrayscaleFade(durationMs) {
-    clearInterval(BP.grayscaleTimer);
-
-    const TICK_MS = 1000;
-    const steps = Math.max(1, durationMs / TICK_MS);
-    const satStep = BP.saturation / steps;     // reaches 0 exactly when the timer expires
-    const briStep = (BP.brightness - 0.85) / steps;
-
-    BP.grayscaleTimer = setInterval(() => {
-      if (!BP.active || BP.paused) return;
-      BP.saturation = clamp(BP.saturation - satStep, 0, 1.0);
-      BP.brightness = clamp(BP.brightness - briStep, 0.85, 1.0);
-      updateFeedFilter();
-      if (BP.saturation <= 0) {
-        clearInterval(BP.grayscaleTimer);
-        BP.grayscaleComplete = true;
-      }
-    }, TICK_MS);
-  }
-
-  function resetGrayscale() {
-    // Only called at session end — grayscale is never reset mid-session
-    clearInterval(BP.grayscaleTimer);
-    BP.saturation = 1.0;
-    BP.brightness = 1.0;
-    BP.grayscaleComplete = false;
-    updateFeedFilter();
-  }
-
-  // ── Scroll Tracking ─────────────────────────────────────────
-  function initScrollTracking() {
+    };
     window.addEventListener('scroll', onScroll, { passive: true });
-    // Also track Instagram's main scroll container
     document.addEventListener('scroll', onScroll, { passive: true, capture: true });
   }
 
-  function onScroll(e) {
-    if (!BP.active || BP.paused) return;
-    const now = Date.now();
-    const dt = (now - BP.lastScrollTime) / 1000;
-    const dy = Math.abs(window.scrollY - BP.lastScrollY);
-    if (dt > 0) BP.scrollVelocity = dy / dt;
-
-    BP.scrollSamples.push(BP.scrollVelocity);
-    if (BP.scrollSamples.length > 10) BP.scrollSamples.shift();
-
-    BP.lastScrollY = window.scrollY;
-    BP.lastScrollTime = now;
-
-    // Fast scroll detection
-    const avgVel = BP.scrollSamples.reduce((a, b) => a + b, 0) / BP.scrollSamples.length;
-    if (avgVel > 1200) {
-      BP.fastScrollCount++;
-      if (BP.fastScrollCount >= 3) {
-        BP.fastScrollCount = 0;
-        showPetMessage(rand(PET_MSGS.fast));
-        // Accelerate to gray over 8s then prompt — or trigger immediately if already gray
-        clearTimeout(BP.promptTimerId);
-        if (BP.grayscaleComplete) {
-          triggerPrompt();
-        } else {
-          const FAST_SCROLL_FADE_MS = 8000;
-          startGrayscaleFade(FAST_SCROLL_FADE_MS);
-          BP.promptTimerId = setTimeout(() => {
-            if (BP.active && !BP.paused) triggerPrompt();
-          }, FAST_SCROLL_FADE_MS);
-        }
-      }
-    }
-
-    // Doomscroll mode: check engagement
-    if (BP.settings?.mode === 'doomscroll') {
-      checkEngagement();
-    }
-  }
-
-  // ── Engagement Tracking ─────────────────────────────────────
-  function initEngagementTracking() {
-    // Watch for like / comment interactions via mutation or click delegation
+  // ─────────────────────────────────────────────────────────────
+  //  ENGAGEMENT TRACKING
+  // ─────────────────────────────────────────────────────────────
+  function initEngagement() {
     document.addEventListener('click', (e) => {
-      const target = e.target?.closest('[aria-label*="Like"], [aria-label*="Comment"], [aria-label*="Save"]');
-      if (target) {
-        BP.likeCount++;
-        BP.engagementWarned = false;
+      if (e.target?.closest('[aria-label*="Like"],[aria-label*="Unlike"],[aria-label*="Comment"],[aria-label*="Save"]')) {
+        S.likeCount++;
+        S.engWarn = false;
       }
     }, { capture: true });
-  }
 
-  function checkEngagement() {
-    const now = Date.now();
-    const elapsed = (now - BP.lastEngagementCheck) / 1000;
-    if (elapsed < 90) return; // check every 90 seconds
-
-    BP.lastEngagementCheck = now;
-    if (BP.likeCount < 1 && !BP.engagementWarned) {
-      BP.engagementWarned = true;
-      showPetMessage(rand(PET_MSGS.low_engage));
-
-      // If already gray, trigger immediately; otherwise start a fast 10s fade then prompt
-      clearTimeout(BP.promptTimerId);
-      if (BP.grayscaleComplete) {
-        triggerPrompt();
-      } else {
-        const DOOMSCROLL_FADE_MS = 10000;
-        startGrayscaleFade(DOOMSCROLL_FADE_MS);
-        BP.promptTimerId = setTimeout(() => {
-          if (BP.active && !BP.paused) triggerPrompt();
-        }, DOOMSCROLL_FADE_MS);
+    S.engTimer = setInterval(() => {
+      if (!S.running || S.paused) return;
+      if (Date.now() - S.engReset < 90_000) return;
+      // 90 s passed
+      if (S.likeCount === 0 && !S.engWarn) {
+        S.engWarn = true;
+        petSay(rnd(MSGS.shy));
+        if (S.cfg?.mode === 'doomscroll') firePetTriggerPrompt();
       }
-    }
-    BP.likeCount = 0;
+      S.likeCount = 0;
+      S.engReset  = Date.now();
+      S.engWarn   = false;
+    }, 8000);
   }
 
-  // ── Brain Pet ───────────────────────────────────────────────
-  function createPet() {
-    if ($('#bp-pet')) return;
+  // ─────────────────────────────────────────────────────────────
+  //  BRAIN PET  (sidebar — large, middle-right)
+  // ─────────────────────────────────────────────────────────────
+  function buildPet() {
+    if (document.getElementById('bp-pet')) return;
 
-    const pet = document.createElement('div');
-    pet.id = 'bp-pet';
-    pet.innerHTML = `
-      <div class="bp-pet-bubble" id="bp-pet-bubble"></div>
+    const wrap = document.createElement('div');
+    wrap.id = 'bp-pet';
+    wrap.innerHTML = `
+      <div id="bp-bubble" class="bp-bubble"></div>
       <div class="bp-pet-body">
-        <svg viewBox="0 0 90 90" xmlns="http://www.w3.org/2000/svg" class="bp-brain-svg">
-          <!-- Brain shape -->
-          <g class="bp-brain-group">
-            <!-- Left hemisphere -->
-            <path d="M 45 72 C 20 72 8 58 8 42 C 8 26 20 14 35 14 C 38 14 41 15 43 16 C 41 12 38 8 38 8 C 52 6 58 18 55 26 C 60 22 68 24 70 32 C 76 30 84 36 82 46 C 80 56 72 62 62 64 C 60 68 54 72 45 72 Z" 
-              fill="#c4b5fd" class="bp-brain-path"/>
-            <!-- Right highlight -->
-            <path d="M 45 72 C 30 70 20 62 18 52 C 16 42 22 34 30 30 C 28 38 32 46 40 50 C 38 56 40 64 45 72 Z"
-              fill="#a78bfa" opacity="0.5"/>
-            <!-- Folds -->
-            <path d="M 35 28 Q 45 32 42 42" stroke="#7c3aed" stroke-width="1.5" fill="none" opacity="0.4" stroke-linecap="round"/>
-            <path d="M 55 30 Q 58 40 52 48" stroke="#7c3aed" stroke-width="1.5" fill="none" opacity="0.4" stroke-linecap="round"/>
-            <path d="M 25 45 Q 33 50 28 58" stroke="#7c3aed" stroke-width="1.5" fill="none" opacity="0.4" stroke-linecap="round"/>
-          </g>
-          <!-- Eyes -->
-          <g class="bp-eyes">
-            <circle cx="34" cy="46" r="5" fill="white"/>
-            <circle cx="56" cy="46" r="5" fill="white"/>
-            <circle cx="35" cy="47" r="3" fill="#1e1b4b" class="bp-pupil-l"/>
-            <circle cx="57" cy="47" r="3" fill="#1e1b4b" class="bp-pupil-r"/>
-            <circle cx="36" cy="46" r="1" fill="white"/>
-            <circle cx="58" cy="46" r="1" fill="white"/>
-          </g>
-          <!-- Mouth -->
-          <path d="M 37 58 Q 45 65 53 58" stroke="#7c3aed" stroke-width="2" fill="none" 
-            stroke-linecap="round" class="bp-mouth"/>
-          <!-- Cheeks -->
-          <circle cx="28" cy="54" r="4" fill="#f472b6" opacity="0.3" class="bp-cheeks"/>
-          <circle cx="62" cy="54" r="4" fill="#f472b6" opacity="0.3" class="bp-cheeks"/>
-        </svg>
-        <div class="bp-level-badge" id="bp-level-badge">Lv.${BP.petLevel}</div>
-      </div>
-    `;
-    document.body.appendChild(pet);
-    BP.petEl = pet;
+        ${brainSVG('pet')}
+        <div class="bp-lvl-badge" id="bp-lvl-badge">Lv.${S.level}</div>
+        <div class="bp-sparks">
+          <span class="bp-sp s1">✨</span>
+          <span class="bp-sp s2">💗</span>
+          <span class="bp-sp s3">⭐</span>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
 
-    pet.addEventListener('click', () => {
-      showPetMessage(rand(PET_MSGS.general));
-    });
-
-    // Random pet pop-in schedule
-    schedulePetAppearance();
+    wrap.querySelector('.bp-pet-body').addEventListener('click', () => petSay(rnd(MSGS.rand)));
+    scheduleRandMessage();
   }
 
-  function showPetMessage(msg, duration = 3500) {
-    const pet = $('#bp-pet');
-    const bubble = $('#bp-pet-bubble');
+  function petSay(msg, dur = 4200) {
+    const pet    = document.getElementById('bp-pet');
+    const bubble = document.getElementById('bp-bubble');
     if (!pet || !bubble) return;
 
     bubble.textContent = msg;
-    pet.classList.add('bp-pet-visible', 'bp-pet-talking');
-    bubble.classList.add('bp-bubble-visible');
+    bubble.classList.add('bp-bubble-show');
+    pet.classList.add('bp-pet-show', 'bp-pet-talk');
 
-    clearTimeout(BP.petHideTimerId);
-    BP.petHideTimerId = setTimeout(() => {
-      bubble.classList.remove('bp-bubble-visible');
-      // Keep pet visible a bit longer
+    clearTimeout(S.petBubbleTimer);
+    S.petBubbleTimer = setTimeout(() => {
+      bubble.classList.remove('bp-bubble-show');
+      pet.classList.remove('bp-pet-talk');
       setTimeout(() => {
-        if (!$('#bp-overlay')) pet.classList.remove('bp-pet-visible');
-        pet.classList.remove('bp-pet-talking');
-      }, 600);
-    }, duration);
+        if (!document.getElementById('bp-overlay'))
+          pet.classList.remove('bp-pet-show');
+      }, 500);
+    }, dur);
   }
 
-  function schedulePetAppearance() {
-    clearTimeout(BP.petTimerId);
-    // Appear randomly every 45–120 seconds
-    const delay = 45000 + Math.random() * 75000;
-    BP.petTimerId = setTimeout(() => {
-      if (!BP.active || BP.paused) { schedulePetAppearance(); return; }
-      showPetMessage(rand(PET_MSGS.general));
-      schedulePetAppearance();
-    }, delay);
+  function scheduleRandMessage() {
+    clearTimeout(S.petRandTimer);
+    S.petRandTimer = setTimeout(() => {
+      if (S.running && !S.paused) petSay(rnd(MSGS.rand));
+      scheduleRandMessage();
+    }, 45_000 + Math.random() * 75_000);
   }
 
-  function updatePetLevel() {
-    const badge = $('#bp-level-badge');
-    if (badge) badge.textContent = `Lv.${BP.petLevel}`;
-    const pet = $('#bp-pet');
-    if (pet) {
-      pet.classList.add('bp-level-glow');
-      setTimeout(() => pet.classList.remove('bp-level-glow'), 2000);
-    }
+  function petLevelUp() {
+    S.level++;
+    const b = document.getElementById('bp-lvl-badge');
+    if (b) b.textContent = `Lv.${S.level}`;
+    const p = document.getElementById('bp-pet');
+    if (p) { p.classList.add('bp-pet-glow'); setTimeout(() => p.classList.remove('bp-pet-glow'), 2800); }
+    petSay(rnd(MSGS.lvlUp), 4500);
   }
 
-  // ── Setup Overlay ───────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  //  SETUP CARD
+  // ─────────────────────────────────────────────────────────────
   function showSetup() {
-    if ($('#bp-setup')) return;
+    if (document.getElementById('bp-setup')) return;
 
     const el = document.createElement('div');
     el.id = 'bp-setup';
     el.innerHTML = `
       <div class="bp-setup-card">
-        <div class="bp-setup-pet">
-          <svg viewBox="0 0 90 90" xmlns="http://www.w3.org/2000/svg" style="width:64px;height:64px">
-            <path d="M 45 72 C 20 72 8 58 8 42 C 8 26 20 14 35 14 C 38 14 41 15 43 16 C 41 12 38 8 38 8 C 52 6 58 18 55 26 C 60 22 68 24 70 32 C 76 30 84 36 82 46 C 80 56 72 62 62 64 C 60 68 54 72 45 72 Z" fill="#c4b5fd"/>
-            <path d="M 45 72 C 30 70 20 62 18 52 C 16 42 22 34 30 30 C 28 38 32 46 40 50 C 38 56 40 64 45 72 Z" fill="#a78bfa" opacity="0.5"/>
-            <circle cx="34" cy="46" r="5" fill="white"/>
-            <circle cx="56" cy="46" r="5" fill="white"/>
-            <circle cx="35" cy="47" r="3" fill="#1e1b4b"/>
-            <circle cx="57" cy="47" r="3" fill="#1e1b4b"/>
-            <path d="M 37 58 Q 45 65 53 58" stroke="#7c3aed" stroke-width="2" fill="none" stroke-linecap="round"/>
-          </svg>
-        </div>
-        <h2 class="bp-setup-title">Hey! I'm your Brain Pet 🧠</h2>
-        <p class="bp-setup-sub">I'll help you scroll more mindfully on Instagram. How would you like me to check in?</p>
-
-        <div class="bp-mode-cards">
-          <div class="bp-mode-card bp-mode-selected" data-mode="timer">
-            <span class="bp-mode-icon">⏱️</span>
-            <div>
-              <div class="bp-mode-name">Set a Timer</div>
-              <div class="bp-mode-desc">I'll prompt you every few minutes</div>
-            </div>
-          </div>
-          <div class="bp-mode-card" data-mode="doomscroll">
-            <span class="bp-mode-icon">🔍</span>
-            <div>
-              <div class="bp-mode-name">Detect Doomscrolling</div>
-              <div class="bp-mode-desc">I'll step in when I notice you zoning out</div>
-            </div>
+        <div class="bp-setup-top">
+          <div class="bp-setup-brain">${brainSVG('prompt')}</div>
+          <div class="bp-setup-intro">
+            <p class="bp-setup-hi">Hey! I'm your Brain Pet 🧠💗</p>
+            <p class="bp-setup-hint">I'll help you scroll more mindfully on Instagram.</p>
           </div>
         </div>
 
-        <div class="bp-interval-row" id="bp-interval-row">
-          <label class="bp-label">First prompt after</label>
+        <h2 class="bp-h2">Welcome to BrainPause</h2>
+        <p class="bp-sub">How should I check in with you?</p>
+
+        <div class="bp-modes">
+          <label class="bp-mode bp-mode-on" data-mode="timer">
+            <span class="bp-mode-ico">⏱️</span>
+            <span class="bp-mode-body">
+              <strong>Set a Timer</strong>
+              <small>Prompts on a regular schedule</small>
+            </span>
+            <span class="bp-mode-dot"></span>
+          </label>
+          <label class="bp-mode" data-mode="doomscroll">
+            <span class="bp-mode-ico">🔍</span>
+            <span class="bp-mode-body">
+              <strong>Detect Doomscrolling</strong>
+              <small>I step in when I notice you zoning out</small>
+            </span>
+            <span class="bp-mode-dot"></span>
+          </label>
+        </div>
+
+        <div class="bp-field">
+          <label class="bp-lbl">First prompt after</label>
           <div class="bp-slider-row">
-            <input type="range" id="bp-interval-slider" min="1" max="60" value="5" class="bp-slider">
-            <span class="bp-slider-val" id="bp-slider-val">5 min</span>
+            <input type="range" id="bp-iv" min="1" max="30" value="5" class="bp-range">
+            <span class="bp-rv" id="bp-ivv">5 min</span>
           </div>
         </div>
 
-        <div class="bp-session-limit-row">
-          <label class="bp-label">Session limit</label>
+        <div class="bp-field">
+          <label class="bp-lbl">Session limit</label>
           <div class="bp-slider-row">
-            <input type="range" id="bp-session-slider" min="5" max="120" value="30" class="bp-slider">
-            <span class="bp-slider-val" id="bp-session-val">30 min</span>
+            <input type="range" id="bp-sess" min="5" max="120" value="30" class="bp-range">
+            <span class="bp-rv" id="bp-sessv">30 min</span>
           </div>
         </div>
 
-        <button class="bp-cta" id="bp-start-btn">
-          <span>Let's go</span>
-          <span class="bp-cta-arrow">→</span>
-        </button>
-      </div>
-    `;
+        <button class="bp-go" id="bp-go">Let's go <span>→</span></button>
+      </div>`;
     document.body.appendChild(el);
-    BP.setupEl = el;
 
-    // Mode selection
-    let selectedMode = 'timer';
-    $$('.bp-mode-card').forEach(card => {
-      card.addEventListener('click', () => {
-        $$('.bp-mode-card').forEach(c => c.classList.remove('bp-mode-selected'));
-        card.classList.add('bp-mode-selected');
-        selectedMode = card.dataset.mode;
-        $('#bp-interval-row').style.display = selectedMode === 'timer' ? 'block' : 'block';
-      });
-    });
+    let mode = 'timer';
+    qsa('.bp-mode', el).forEach(m => m.addEventListener('click', () => {
+      qsa('.bp-mode', el).forEach(x => x.classList.remove('bp-mode-on'));
+      m.classList.add('bp-mode-on');
+      mode = m.dataset.mode;
+    }));
 
-    // Sliders
-    $('#bp-interval-slider').addEventListener('input', (e) => {
-      $('#bp-slider-val').textContent = e.target.value + ' min';
-    });
-    $('#bp-session-slider').addEventListener('input', (e) => {
-      $('#bp-session-val').textContent = e.target.value + ' min';
-    });
+    qs('#bp-iv',   el).addEventListener('input', e => qs('#bp-ivv',   el).textContent = e.target.value + ' min');
+    qs('#bp-sess', el).addEventListener('input', e => qs('#bp-sessv', el).textContent = e.target.value + ' min');
 
-    // Start
-    $('#bp-start-btn').addEventListener('click', () => {
-      const intervalMin = parseInt($('#bp-interval-slider').value);
-      const sessionMin = parseInt($('#bp-session-slider').value);
-      const settings = { mode: selectedMode, intervalMin, sessionMin };
-      startSession(settings);
-
+    qs('#bp-go', el).addEventListener('click', () => {
+      const cfg = { mode, intervalMin: +qs('#bp-iv', el).value, sessionMin: +qs('#bp-sess', el).value };
+      startSession(cfg);
       el.classList.add('bp-fade-out');
       setTimeout(() => el.remove(), 500);
     });
 
-    // Animate in
-    requestAnimationFrame(() => el.classList.add('bp-setup-visible'));
+    requestAnimationFrame(() => el.classList.add('bp-in'));
   }
 
-  // ── Session Management ──────────────────────────────────────
-  function startSession(settings) {
-    BP.active = true;
-    BP.paused = false;
-    BP.settings = settings;
-    BP.intervalMs = settings.intervalMin * 60000;
-    BP.sessionStart = Date.now();
-    BP.promptCount = 0;
-    BP.xp = 0;
-    BP.level = 1;
-    BP.saturation = 1.0;
-    BP.brightness = 1.0;
-    BP.grayscaleComplete = false;
+  // ─────────────────────────────────────────────────────────────
+  //  SESSION
+  // ─────────────────────────────────────────────────────────────
+  function startSession(cfg) {
+    S.running = true;
+    S.paused  = false;
+    S.cfg     = cfg;
+    S.intervalMs  = cfg.intervalMin * 60_000;
+    S.sessionStart = Date.now();
+    S.sat = 1.0; S.bri = 1.0; S.gsStep = 0;
 
-    // Persist
     chrome.storage.local.set({
       brainpause_active: true,
-      brainpause_settings: settings,
-      brainpause_stats: { prompts: 0, level: 1, levelProgress: 0, startTime: Date.now() }
+      brainpause_settings: cfg,
+      brainpause_stats: { prompts: 0, level: 1, lp: 0, start: Date.now() },
     });
 
-    // Initialize features
-    initFeedFilter();
-    initScrollTracking();
-    initEngagementTracking();
-    createPet();
+    initGrayscale();
+    initScroll();
+    initEngagement();
+    buildPet();
 
-    // Schedule first prompt (this also kicks off the grayscale fade)
-    scheduleNextPrompt();
-
-    // Session limit
-    chrome.runtime.sendMessage({
-      type: 'SET_SESSION_END',
-      delayMinutes: settings.sessionMin
-    });
-
-    showPetMessage('Session started! I\'ll keep an eye on you 👀', 3000);
+    S.gsTimer = setInterval(tickGrayscale, 20_000);
+    scheduleNext();
+    chrome.runtime.sendMessage({ type: 'SET_SESSION_END', delayMinutes: cfg.sessionMin });
+    setTimeout(() => petSay('Session started! I\'ll keep watch 👀', 3500), 700);
   }
 
-  function scheduleNextPrompt() {
-    clearTimeout(BP.promptTimerId);
-    clearInterval(BP.countdownTimer);
+  function scheduleNext() {
+    clearTimeout(S.promptTimer);
+    clearInterval(S.cdInterval);
+    S.cdVal = Math.floor(S.intervalMs / 1000);
+    S.cdInterval = setInterval(() => { if (!S.paused) S.cdVal = Math.max(0, S.cdVal - 1); }, 1000);
+    S.promptTimer = setTimeout(() => { if (S.running && !S.paused) firePrompt(); }, S.intervalMs);
+  }
 
-    BP.countdownVal = Math.floor(BP.intervalMs / 1000);
+  function firePrompt() {
+    showOverlay(pickPrompt());
+    S.intervalMs = Math.max(S.minIntervalMs, Math.floor(S.intervalMs / 2));
+  }
 
-    BP.countdownTimer = setInterval(() => {
-      if (!BP.paused) BP.countdownVal = Math.max(0, BP.countdownVal - 1);
-    }, 1000);
+  // engagement-triggered (doomscroll mode)
+  function firePetTriggerPrompt() {
+    clearTimeout(S.promptTimer);
+    clearInterval(S.cdInterval);
+    firePrompt();
+  }
 
-    // Only start the grayscale fade on the very first timer — once gray, it stays gray
-    if (BP.saturation > 0 && !BP.grayscaleComplete) {
-      startGrayscaleFade(BP.intervalMs);
+  function pickPrompt(skip = null) {
+    const pool = PROMPTS.filter(p => p.id !== skip && !S.usedIds.has(p.id));
+    const src  = pool.length ? pool : PROMPTS.filter(p => p.id !== skip);
+    if (!src.length) { S.usedIds.clear(); return PROMPTS[0]; }
+    return src[Math.floor(Math.random() * src.length)];
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  PROMPT OVERLAY
+  // ─────────────────────────────────────────────────────────────
+  function showOverlay(prompt) {
+    document.getElementById('bp-overlay')?.remove();
+
+    const ov = document.createElement('div');
+    ov.id = 'bp-overlay';
+    ov.innerHTML = `
+      <div class="bp-backdrop"></div>
+      <div class="bp-card">
+
+        <!-- Pet row -->
+        <div class="bp-pet-row">
+          <div class="bp-pet-avatar">${brainSVG('prompt')}</div>
+          <div class="bp-pet-say">
+            <div class="bp-say-main">Hey… it's been a while 👋</div>
+            <div class="bp-say-hint">${prompt.petLine || 'Take a moment for yourself 💗'}</div>
+          </div>
+        </div>
+
+        <!-- Title bar -->
+        <div class="bp-title-row">
+          <div class="bp-emoji-box">${prompt.emoji}</div>
+          <h3 class="bp-title">${prompt.title}</h3>
+        </div>
+
+        <!-- Body -->
+        <div class="bp-body">${makeBody(prompt)}</div>
+
+        <!-- Feedback zone -->
+        <div class="bp-feedback" id="bp-feedback" style="display:none">
+          <div class="bp-fb-pet">${brainSVG('mini')}</div>
+          <div class="bp-fb-msg" id="bp-fb-msg"></div>
+        </div>
+
+        <!-- Buttons -->
+        <div class="bp-actions">
+          <button class="bp-skip" id="bp-skip">↻ Try another</button>
+          <button class="bp-done" id="bp-done">Done ✓</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+
+    // show pet on sidebar
+    document.getElementById('bp-pet')?.classList.add('bp-pet-show');
+
+    // wire
+    qs('#bp-done', ov).addEventListener('click', () => onDone(prompt, ov));
+    qs('#bp-skip', ov).addEventListener('click', () => onSkip(prompt));
+
+    if (prompt.type === 'breathing') startBreathing(ov);
+    if (prompt.type === 'countdown') startCountdown(prompt, ov);
+    if (prompt.type === 'physical')  wirePhysical(ov);
+    if (prompt.type === 'ack')       wireAck(ov);
+
+    requestAnimationFrame(() => ov.classList.add('bp-ov-in'));
+  }
+
+  function makeBody(p) {
+    switch (p.type) {
+      case 'breathing': return `
+        <p class="bp-desc">${p.desc}</p>
+        <div class="bp-breath-wrap">
+          <div class="bp-ring" id="bp-ring">
+            <span class="bp-ring-lbl" id="bp-ring-lbl">Breathe in…</span>
+          </div>
+        </div>`;
+
+      case 'write': case 'sixwords': return `
+        <p class="bp-desc">${p.q}</p>
+        <textarea class="bp-ta" id="bp-ta" placeholder="${p.ph || 'Type here…'}" rows="3"
+          ${p.type === 'sixwords' ? 'maxlength="90"' : ''}></textarea>
+        ${p.type === 'sixwords' ? '<div class="bp-wc" id="bp-wc">0 / 6 words</div>' : ''}`;
+
+      case 'physical': return `
+        <div class="bp-phys">
+          <div class="bp-phys-ico" id="bp-phys-ico">${p.mainIcon}</div>
+          <p class="bp-desc">${p.mainText}</p>
+          <div class="bp-phys-cnt" id="bp-cnt">0<span>/5</span></div>
+          <button class="bp-cnt-btn" id="bp-inc">+ One done!</button>
+          <button class="bp-alt-tog" id="bp-alt-tog">Can't do that right now?</button>
+          <div class="bp-alt-box" id="bp-alt-box" style="display:none">${p.altIcon} ${p.altText}</div>
+        </div>`;
+
+      case 'countdown': return `
+        <p class="bp-desc">${p.q}</p>
+        <div class="bp-cd-wrap">
+          <div class="bp-cd-ring">
+            <svg viewBox="0 0 80 80" class="bp-cd-svg">
+              <circle cx="40" cy="40" r="34" fill="none" stroke="#252538" stroke-width="6"/>
+              <circle cx="40" cy="40" r="34" fill="none" stroke="#ff8fab" stroke-width="6"
+                stroke-dasharray="213.6" stroke-dashoffset="0" id="bp-cd-arc"
+                stroke-linecap="round" transform="rotate(-90 40 40)"/>
+            </svg>
+            <div class="bp-cd-num" id="bp-cd-num">${p.duration}</div>
+          </div>
+        </div>`;
+
+      case 'senses': return `
+        <p class="bp-desc">${p.q}</p>
+        <div class="bp-senses">
+          ${p.senses.map(s => `
+            <div class="bp-sense-row">
+              <span class="bp-si">${s.icon}</span>
+              <span class="bp-sl">${s.lbl}</span>
+              <input class="bp-si-in" placeholder="I ${s.lbl.toLowerCase()}…" type="text">
+            </div>`).join('')}
+        </div>`;
+
+      case 'ack': return `
+        <p class="bp-desc">${p.q}</p>
+        <p class="bp-sub">${p.sub || ''}</p>
+        <div class="bp-ack-ico">💧</div>
+        <button class="bp-ack-btn" id="bp-ack-btn">${p.cta}</button>`;
     }
-
-    BP.promptTimerId = setTimeout(() => {
-      if (BP.active && !BP.paused) triggerPrompt();
-    }, BP.intervalMs);
+    return `<p class="bp-desc">${p.q || p.desc || ''}</p>`;
   }
 
-  function triggerPrompt() {
-    if (!BP.active || BP.paused) return;
-    clearInterval(BP.grayscaleTimer); // stop ticking, feed is already fully gray
-    const prompt = pickPrompt();
-    showPromptOverlay(prompt);
-
-    // Halve the interval for the next cycle
-    BP.intervalMs = Math.max(BP.minIntervalMs, Math.floor(BP.intervalMs / 2));
-  }
-
-  function pickPrompt(excludeId = null) {
-    const available = PROMPTS.filter(p => p.id !== excludeId && !BP.usedPromptIds.has(p.id));
-    if (available.length === 0) {
-      BP.usedPromptIds.clear();
-      return PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
-    }
-    return available[Math.floor(Math.random() * available.length)];
-  }
-
-  // ── Prompt Overlay ──────────────────────────────────────────
-  function showPromptOverlay(prompt) {
-    // Remove existing overlay
-    $('#bp-overlay')?.remove();
-    BP.activePromptId = prompt.id;
-
-    const overlay = document.createElement('div');
-    overlay.id = 'bp-overlay';
-
-    overlay.innerHTML = `
-      <div class="bp-overlay-backdrop"></div>
-      <div class="bp-overlay-card">
-        <!-- Pet in overlay -->
-        <div class="bp-overlay-pet">
-          <svg viewBox="0 0 90 90" xmlns="http://www.w3.org/2000/svg" class="bp-overlay-brain">
-            <path d="M 45 72 C 20 72 8 58 8 42 C 8 26 20 14 35 14 C 38 14 41 15 43 16 C 41 12 38 8 38 8 C 52 6 58 18 55 26 C 60 22 68 24 70 32 C 76 30 84 36 82 46 C 80 56 72 62 62 64 C 60 68 54 72 45 72 Z" fill="#c4b5fd"/>
-            <path d="M 45 72 C 30 70 20 62 18 52 C 16 42 22 34 30 30 C 28 38 32 46 40 50 C 38 56 40 64 45 72 Z" fill="#a78bfa" opacity="0.5"/>
-            <path d="M 35 28 Q 45 32 42 42" stroke="#7c3aed" stroke-width="1.5" fill="none" opacity="0.4" stroke-linecap="round"/>
-            <path d="M 55 30 Q 58 40 52 48" stroke="#7c3aed" stroke-width="1.5" fill="none" opacity="0.4" stroke-linecap="round"/>
-            <circle cx="34" cy="46" r="5" fill="white"/>
-            <circle cx="56" cy="46" r="5" fill="white"/>
-            <circle cx="35" cy="47" r="3" fill="#1e1b4b"/>
-            <circle cx="57" cy="47" r="3" fill="#1e1b4b"/>
-            <circle cx="36" cy="46" r="1" fill="white"/>
-            <circle cx="58" cy="46" r="1" fill="white"/>
-            <path d="M 37 58 Q 45 65 53 58" stroke="#7c3aed" stroke-width="2" fill="none" stroke-linecap="round"/>
-            <circle cx="28" cy="54" r="4" fill="#f472b6" opacity="0.3"/>
-            <circle cx="62" cy="54" r="4" fill="#f472b6" opacity="0.3"/>
-          </svg>
-          <div class="bp-overlay-speech">Hey… it's been a while 👋</div>
-        </div>
-
-        <div class="bp-prompt-header">
-          <span class="bp-prompt-emoji">${prompt.emoji}</span>
-          <h3 class="bp-prompt-title">${prompt.title}</h3>
-        </div>
-
-        <div class="bp-prompt-body" id="bp-prompt-body">
-          ${renderPromptBody(prompt)}
-        </div>
-
-        <div class="bp-prompt-actions">
-          <button class="bp-btn-skip" id="bp-btn-skip">Try a different one ↻</button>
-          <button class="bp-btn-done" id="bp-btn-done">Done ✓</button>
-        </div>
-
-        <div class="bp-validation-msg" id="bp-validation-msg"></div>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    BP.overlayEl = overlay;
-
-    // Show pet in corner too
-    $('#bp-pet')?.classList.add('bp-pet-visible');
-
-    // Wire up buttons
-    $('#bp-btn-done').addEventListener('click', () => completePrompt(prompt));
-    $('#bp-btn-skip').addEventListener('click', () => skipPrompt(prompt));
-
-    // Start any timers in the prompt
-    if (prompt.type === 'countdown') startCountdownPrompt(prompt);
-    if (prompt.type === 'breathing') startBreathingAnimation();
-
-    // Animate in
-    requestAnimationFrame(() => overlay.classList.add('bp-overlay-visible'));
-  }
-
-  function renderPromptBody(prompt) {
-    switch (prompt.type) {
-      case 'breathing':
-        return `
-          <p class="bp-prompt-desc">${prompt.desc}</p>
-          <div class="bp-breathing-container">
-            <div class="bp-breath-ring" id="bp-breath-ring">
-              <div class="bp-breath-inner">
-                <span class="bp-breath-label" id="bp-breath-label">Breathe in</span>
-              </div>
-            </div>
-          </div>
-        `;
-
-      case 'write':
-      case 'six_words':
-        return `
-          <p class="bp-prompt-desc">${prompt.prompt}</p>
-          <textarea class="bp-textarea" id="bp-text-input" 
-            placeholder="${prompt.placeholder || 'Type here…'}" 
-            rows="3" ${prompt.type === 'six_words' ? 'maxlength="60"' : ''}></textarea>
-          ${prompt.type === 'six_words' ? '<div class="bp-word-count" id="bp-word-count">0 / 6 words</div>' : ''}
-        `;
-
-      case 'physical':
-        return `
-          <div class="bp-physical-main">
-            <div class="bp-physical-icon">${prompt.primaryIcon}</div>
-            <p class="bp-prompt-desc">${prompt.primary}</p>
-            <div class="bp-physical-count" id="bp-phys-count">0 / 5</div>
-            <div class="bp-count-btns">
-              <button class="bp-count-btn" id="bp-count-inc">+1 Done!</button>
-            </div>
-          </div>
-          <div class="bp-physical-alt">
-            <button class="bp-alt-toggle" id="bp-alt-toggle">Can't do that right now?</button>
-            <p class="bp-alt-text" id="bp-alt-text" style="display:none">${prompt.altIcon} ${prompt.alt}</p>
-          </div>
-        `;
-
-      case 'countdown':
-        return `
-          <p class="bp-prompt-desc">${prompt.prompt}</p>
-          <div class="bp-countdown-container">
-            <div class="bp-countdown-ring">
-              <svg class="bp-countdown-svg" viewBox="0 0 80 80">
-                <circle cx="40" cy="40" r="34" fill="none" stroke="#2a2a36" stroke-width="5"/>
-                <circle cx="40" cy="40" r="34" fill="none" stroke="#a78bfa" stroke-width="5"
-                  stroke-dasharray="213.6" stroke-dashoffset="0" id="bp-countdown-circle"
-                  stroke-linecap="round" transform="rotate(-90 40 40)"/>
-              </svg>
-              <div class="bp-countdown-val" id="bp-countdown-val">${prompt.duration}</div>
-            </div>
-          </div>
-        `;
-
-      case 'senses':
-        return `
-          <p class="bp-prompt-desc">${prompt.prompt}</p>
-          <div class="bp-senses-grid">
-            ${prompt.senses.map(s => `
-              <div class="bp-sense-row">
-                <span class="bp-sense-icon">${s.icon}</span>
-                <span class="bp-sense-label">${s.label}</span>
-                <input class="bp-sense-input" placeholder="I can ${s.label.toLowerCase()}…" type="text">
-              </div>
-            `).join('')}
-          </div>
-        `;
-
-      case 'acknowledge':
-        return `
-          <p class="bp-prompt-desc">${prompt.prompt}</p>
-          <p class="bp-prompt-sub">${prompt.sub || ''}</p>
-          <div style="font-size:48px;text-align:center;margin:16px 0">💧</div>
-        `;
-    }
-    return `<p class="bp-prompt-desc">${prompt.prompt || prompt.desc}</p>`;
-  }
-
-  function startBreathingAnimation() {
-    const ring = $('#bp-breath-ring');
-    const label = $('#bp-breath-label');
-    if (!ring || !label) return;
-
+  // ── prompt-specific wiring ───────────────────────────────────
+  function startBreathing(root) {
+    const ring = qs('#bp-ring', root), lbl = qs('#bp-ring-lbl', root);
+    if (!ring || !lbl) return;
     let phase = 'in';
-    let cycleCount = 0;
-    const cycle = () => {
-      if (!$('#bp-overlay')) return; // overlay closed
-      if (phase === 'in') {
-        ring.classList.remove('bp-breathe-out');
-        ring.classList.add('bp-breathe-in');
-        label.textContent = 'Breathe in…';
-        phase = 'hold';
-        setTimeout(cycle, 4000);
-      } else if (phase === 'hold') {
-        label.textContent = 'Hold…';
-        phase = 'out';
-        setTimeout(cycle, 2000);
-      } else {
-        ring.classList.remove('bp-breathe-in');
-        ring.classList.add('bp-breathe-out');
-        label.textContent = 'Breathe out…';
-        cycleCount++;
-        phase = 'in';
-        setTimeout(cycle, 4000);
-      }
+    const go = () => {
+      if (!document.getElementById('bp-overlay')) return;
+      if (phase === 'in')   { ring.classList.remove('bp-out'); ring.classList.add('bp-in');  lbl.textContent = 'Breathe in…';  phase = 'hold'; setTimeout(go, 4000); }
+      else if (phase === 'hold') { lbl.textContent = 'Hold…';          phase = 'out';  setTimeout(go, 2000); }
+      else                  { ring.classList.remove('bp-in');  ring.classList.add('bp-out'); lbl.textContent = 'Breathe out…'; phase = 'in';   setTimeout(go, 4500); }
     };
-    cycle();
+    go();
   }
 
-  function startCountdownPrompt(prompt) {
-    let remaining = prompt.duration;
-    const circle = $('#bp-countdown-circle');
-    const val = $('#bp-countdown-val');
-    const total = 213.6;
-
-    const tick = setInterval(() => {
-      if (!$('#bp-overlay')) { clearInterval(tick); return; }
-      remaining--;
-      if (val) val.textContent = remaining;
-      if (circle) {
-        const offset = total * (1 - remaining / prompt.duration);
-        circle.style.strokeDashoffset = offset;
-      }
-      if (remaining <= 0) {
-        clearInterval(tick);
-        if (val) val.textContent = '✓';
-        $('#bp-btn-done')?.classList.add('bp-btn-ready');
-      }
+  function startCountdown(p, root) {
+    let rem = p.duration;
+    const arc = qs('#bp-cd-arc', root), num = qs('#bp-cd-num', root);
+    const t = setInterval(() => {
+      if (!document.getElementById('bp-overlay')) { clearInterval(t); return; }
+      rem--;
+      if (num) num.textContent = rem <= 0 ? '✓' : rem;
+      if (arc)  arc.style.strokeDashoffset = 213.6 * (1 - rem / p.duration);
+      if (rem <= 0) { clearInterval(t); qs('#bp-done', root)?.classList.add('bp-done-ready'); }
     }, 1000);
-
-    // Wire up physical counter if needed
-    const countBtn = $('#bp-count-inc');
-    if (countBtn) {
-      let count = 0;
-      countBtn.addEventListener('click', () => {
-        count++;
-        const el = $('#bp-phys-count');
-        if (el) el.textContent = `${count} / 5`;
-        if (count >= 5) {
-          countBtn.textContent = 'Done! 🎉';
-          countBtn.disabled = true;
-          $('#bp-btn-done')?.classList.add('bp-btn-ready');
-        }
-      });
-    }
   }
 
-  // Wire up physical counter outside of countdown
-  document.addEventListener('click', (e) => {
-    if (e.target.id === 'bp-count-inc') {
-      let count = parseInt($('#bp-phys-count')?.textContent) || 0;
-      count++;
-      const el = $('#bp-phys-count');
-      if (el) el.textContent = `${count} / 5`;
-      if (count >= 5) {
-        e.target.textContent = 'Done! 🎉';
-        e.target.disabled = true;
-        $('#bp-btn-done')?.classList.add('bp-btn-ready');
-      }
-    }
-    if (e.target.id === 'bp-alt-toggle') {
-      const altText = $('#bp-alt-text');
-      if (altText) {
-        const visible = altText.style.display !== 'none';
-        altText.style.display = visible ? 'none' : 'block';
-        e.target.textContent = visible ? 'Can\'t do that right now?' : 'Show original ↑';
+  function wirePhysical(root) {
+    let n = 0;
+    const btn  = qs('#bp-inc',     root);
+    const disp = qs('#bp-cnt',     root);
+    const ico  = qs('#bp-phys-ico',root);
+    btn?.addEventListener('click', () => {
+      n++;
+      if (disp) disp.innerHTML = `${n}<span>/5</span>`;
+      if (ico && n >= 3) ico.style.transform = 'scale(1.3) rotate(8deg)';
+      if (n >= 5) { btn.textContent = '🎉 All done!'; btn.disabled = true; qs('#bp-done', root)?.classList.add('bp-done-ready'); }
+    });
+    const tog = qs('#bp-alt-tog', root), box = qs('#bp-alt-box', root);
+    tog?.addEventListener('click', () => {
+      const v = box.style.display !== 'none';
+      box.style.display = v ? 'none' : 'block';
+      tog.textContent = v ? 'Can\'t do that right now?' : 'Show original ↑';
+    });
+  }
+
+  function wireAck(root) {
+    qs('#bp-ack-btn', root)?.addEventListener('click', (e) => {
+      e.target.textContent = '✓ Nice!'; e.target.disabled = true;
+      qs('#bp-done', root)?.classList.add('bp-done-ready');
+    });
+  }
+
+  // live six-word counter
+  document.addEventListener('input', e => {
+    if (e.target.id === 'bp-ta') {
+      const wc = document.getElementById('bp-wc');
+      if (wc) {
+        const n = e.target.value.trim().split(/\s+/).filter(Boolean).length;
+        wc.textContent = `${n} / 6 words`;
+        wc.style.color = n === 6 ? '#34d399' : n > 6 ? '#f87171' : '#8887a0';
       }
     }
   });
 
-  // Six-word counter
-  document.addEventListener('input', (e) => {
-    if (e.target.id === 'bp-text-input') {
-      const wordCountEl = $('#bp-word-count');
-      if (wordCountEl) {
-        const words = e.target.value.trim().split(/\s+/).filter(Boolean).length;
-        wordCountEl.textContent = `${words} / 6 words`;
-        wordCountEl.style.color = words === 6 ? '#34d399' : (words > 6 ? '#f87171' : '#8b8a99');
-      }
+  // ─────────────────────────────────────────────────────────────
+  //  COMPLETE PROMPT  — the core validation logic
+  // ─────────────────────────────────────────────────────────────
+  async function onDone(prompt, root) {
+    const ta   = qs('#bp-ta', root || document);
+    const resp = ta ? ta.value.trim() : '';
+    const fb   = qs('#bp-feedback', root || document);
+    const fbMsg= qs('#bp-fb-msg',   root || document);
+    const isText = ['write', 'sixwords'].includes(prompt.type);
+
+    // ── 1. EMPTY CHECK ─────────────────────────────────────────
+    if (isText && resp.length === 0) {
+      showFeedback(fb, fbMsg, rnd(MSGS.empty), 'warn');
+      ta.classList.add('bp-shake');
+      setTimeout(() => ta.classList.remove('bp-shake'), 600);
+      return; // block completion — don't dismiss
     }
-  });
 
-  async function completePrompt(prompt) {
-    BP.promptCount++;
-    BP.usedPromptIds.add(prompt.id);
+    // ── 2. NEGATIVE SENTIMENT CHECK ────────────────────────────
+    if (isText && isNegative(resp)) {
+      showFeedback(fb, fbMsg, rnd(MSGS.negative), 'support');
+      addXP(2);
+      // Let them read the message, then dismiss after a pause
+      setTimeout(() => dismissOverlay(), 4500);
+      return;
+    }
 
-    // Get user response for AI validation
-    const textInput = $('#bp-text-input');
-    const userResponse = textInput ? textInput.value : '';
+    // ── 3. POSITIVE / NORMAL PATH ──────────────────────────────
+    S.promptsDone++;
+    S.usedIds.add(prompt.id);
 
-    const validationMsg = $('#bp-validation-msg');
-
-    if (userResponse.trim().length > 0) {
-      validationMsg && (validationMsg.textContent = 'Thinking… 🧠');
+    if (isText && resp.length > 0) {
+      showFeedback(fb, fbMsg, 'Thinking… 🧠', 'loading');
       try {
-        const result = await validatePromptResponse(userResponse, prompt.id);
-        if (result && validationMsg) {
-          validationMsg.textContent = result.message;
-          if (result.level_up) {
-            BP.xp += result.score || 5;
-            checkLevelUp();
-          }
-        }
-      } catch (e) {
-        // Offline — give generic encouragement
-        if (validationMsg) validationMsg.textContent = getLocalEncouragement();
+        const r = await callBackend(resp, prompt.id);
+        showFeedback(fb, fbMsg, r?.message || rnd(MSGS.praise), 'good');
+        if (r?.level_up) { S.xp += (r.score || 7); checkLevel(); }
+        else addXP(4);
+      } catch {
+        showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
         addXP(3);
       }
     } else {
+      showFeedback(fb, fbMsg, rnd(MSGS.praise), 'good');
       addXP(2);
-      if (validationMsg) validationMsg.textContent = getLocalEncouragement();
     }
 
-    // Save stats
-    updateStats();
-
-    // Wait a moment then close
-    setTimeout(() => dismissOverlay(), 2000);
+    saveStats();
+    setTimeout(() => dismissOverlay(), 3000);
   }
 
-  function skipPrompt(currentPrompt) {
-    // Skip to a different prompt, NOT dismiss
-    const next = pickPrompt(currentPrompt.id);
-    $('#bp-overlay')?.remove();
-    showPromptOverlay(next);
+  function showFeedback(area, msgEl, text, type) {
+    if (!area || !msgEl) return;
+    area.style.display = 'flex';
+    msgEl.textContent  = text;
+    msgEl.className    = `bp-fb-msg bp-fb-${type}`;
+  }
+
+  function onSkip(current) {
+    document.getElementById('bp-overlay')?.remove();
+    showOverlay(pickPrompt(current.id));   // always swap, never dismiss
   }
 
   function dismissOverlay() {
-    const overlay = $('#bp-overlay');
-    if (overlay) {
-      overlay.classList.add('bp-overlay-hiding');
-      setTimeout(() => overlay.remove(), 400);
-    }
-    $('#bp-pet')?.classList.remove('bp-pet-visible');
-    scheduleNextPrompt();
+    const ov = document.getElementById('bp-overlay');
+    if (ov) { ov.classList.add('bp-ov-out'); setTimeout(() => ov.remove(), 450); }
+    scheduleNext();
   }
 
-  // ── XP & Leveling ───────────────────────────────────────────
-  function addXP(amount) {
-    BP.xp += amount;
-    checkLevelUp();
+  // ─────────────────────────────────────────────────────────────
+  //  XP / LEVELS
+  // ─────────────────────────────────────────────────────────────
+  function addXP(n) { S.xp += n; checkLevel(); }
+
+  function checkLevel() {
+    if (S.xp >= S.level * 20) petLevelUp();
+    saveStats();
   }
 
-  function checkLevelUp() {
-    const threshold = BP.level * 20;
-    if (BP.xp >= threshold) {
-      BP.level++;
-      BP.petLevel = BP.level;
-      updatePetLevel();
-      showPetMessage(rand(PET_MSGS.level_up), 4000);
-    }
-    updateStats();
-  }
-
-  function updateStats() {
-    const threshold = BP.level * 20;
-    const progress = Math.min(100, (BP.xp / threshold) * 100);
+  function saveStats() {
     chrome.storage.local.set({
       brainpause_stats: {
-        prompts: BP.promptCount,
-        level: BP.level,
-        levelProgress: progress,
-        startTime: BP.sessionStart
-      }
+        prompts: S.promptsDone, level: S.level,
+        lp: Math.min(100, (S.xp / (S.level * 20)) * 100),
+        start: S.sessionStart,
+      },
     });
   }
 
-  // ── AI Validation (Backend) ─────────────────────────────────
-  async function validatePromptResponse(response, promptId) {
-    try {
-      const res = await fetch(`${API}/validate-prompt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response, prompt_type: promptId }),
-        signal: AbortSignal.timeout(5000)
-      });
-      if (!res.ok) throw new Error('Backend unavailable');
-      return await res.json();
-    } catch {
-      return { score: 5, message: getLocalEncouragement(), level_up: false };
-    }
+  // ─────────────────────────────────────────────────────────────
+  //  BACKEND (AI validation)
+  // ─────────────────────────────────────────────────────────────
+  async function callBackend(response, promptId) {
+    const r = await fetch(`${BACKEND}/validate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response, prompt_type: promptId }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) throw new Error();
+    return r.json();
   }
 
-  // ── Local Encouragement Fallback ─────────────────────────────
-  const LOCAL_ENCOURAGEMENT = [
-    'Love that reflection! 💜', 'Keep that energy! ✨', 'So thoughtful 🧠',
-    'That\'s really lovely 🌟', 'You\'re doing great! 🎉', 'Nice one! 💪',
-    'That\'s worth remembering 💡', 'Real good answer! ⭐'
-  ];
-  function getLocalEncouragement() { return rand(LOCAL_ENCOURAGEMENT); }
-
-  // ── Messaging from Background/Popup ─────────────────────────
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'ALARM_TRIGGER') {
-      if (BP.active && !BP.paused) triggerPrompt();
-      sendResponse({ ok: true });
-    }
-    if (message.type === 'SESSION_END') {
-      endSession();
-      sendResponse({ ok: true });
-    }
-    if (message.type === 'TOGGLE_PAUSE') {
-      BP.paused = !BP.paused;
-      if (!BP.paused) scheduleNextPrompt();
-      sendResponse({ paused: BP.paused });
-    }
-    if (message.type === 'END_SESSION') {
-      endSession();
-      sendResponse({ ok: true });
-    }
-    if (message.type === 'GET_NEXT_PROMPT_TIME') {
-      sendResponse({ seconds: BP.countdownVal });
-    }
+  // ─────────────────────────────────────────────────────────────
+  //  EXTENSION MESSAGING
+  // ─────────────────────────────────────────────────────────────
+  chrome.runtime.onMessage.addListener((m, _, reply) => {
+    if (m.type === 'ALARM_TRIGGER')       { if (S.running && !S.paused) firePrompt(); reply({ ok: true }); }
+    if (m.type === 'SESSION_END')         { endSession(); reply({ ok: true }); }
+    if (m.type === 'TOGGLE_PAUSE')        { S.paused = !S.paused; if (!S.paused) scheduleNext(); reply({ paused: S.paused }); }
+    if (m.type === 'END_SESSION')         { endSession(); reply({ ok: true }); }
+    if (m.type === 'GET_NEXT_PROMPT_TIME'){ reply({ seconds: S.cdVal }); }
     return true;
   });
 
   function endSession() {
-    BP.active = false;
-    clearTimeout(BP.promptTimerId);
-    clearInterval(BP.countdownTimer);
-    clearTimeout(BP.petTimerId);
-    clearInterval(BP.grayscaleTimer);
-
-    // Restore colors
-    const style = $('#bp-filter-style');
-    if (style) style.textContent = 'body { filter: saturate(1) brightness(1) !important; transition: filter 2s ease !important; }';
-
-    // Final message
-    $('#bp-overlay')?.remove();
-    showSessionEndCard();
+    S.running = false;
+    clearTimeout(S.promptTimer); clearInterval(S.cdInterval);
+    clearTimeout(S.petRandTimer); clearInterval(S.gsTimer); clearInterval(S.engTimer);
+    restoreGrayscale();
+    document.getElementById('bp-overlay')?.remove();
     chrome.storage.local.set({ brainpause_active: false });
+    petSay(`Session done! Great work 🌟 Lv.${S.level}`, 6000);
   }
 
-  function showSessionEndCard() {
-    const pet = $('#bp-pet');
-    if (!pet) return;
-    showPetMessage(`Session over! Great work 🌟 Lv.${BP.level}`, 6000);
-  }
-
-  // ── Boot ─────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
+  //  BOOT
+  // ─────────────────────────────────────────────────────────────
   async function boot() {
-    const data = await chrome.storage.local.get(['brainpause_active', 'brainpause_settings']);
-
-    if (data.brainpause_active && data.brainpause_settings) {
-      startSession(data.brainpause_settings);
-    } else {
-      // Show setup after a short delay to let Instagram load
-      setTimeout(showSetup, 1800);
-    }
+    const d = await chrome.storage.local.get(['brainpause_active', 'brainpause_settings']);
+    if (d.brainpause_active && d.brainpause_settings) startSession(d.brainpause_settings);
+    else setTimeout(showSetup, 1600);
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
-
+  document.readyState === 'loading'
+    ? document.addEventListener('DOMContentLoaded', boot)
+    : boot();
 })();
