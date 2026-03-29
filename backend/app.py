@@ -1,18 +1,82 @@
 """
-BrainPause — Python Flask Backend (Gemini API - UPDATED)
+BrainPause — Python Flask Backend (Gemini API - FIXED)
 """
 
 import json
 import os
+import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google import genai
 
-# Initialize client (uses GEMINI_API_KEY from environment)
 client = genai.Client()
 
 app = Flask(__name__)
 CORS(app, origins=["https://www.instagram.com", "chrome-extension://*"])
+
+
+# ---------------------------------------------------------------------------
+# 🔒 Safe Gemini call helper (IMPROVED JSON EXTRACTION)
+# ---------------------------------------------------------------------------
+def generate_json(prompt):
+    raw = ""
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",  # Using a more stable model
+            contents=prompt,
+            config={
+                "temperature": 0.3,  # Lower temperature for more consistent JSON
+                "max_output_tokens": 500,
+            }
+        )
+
+        raw = response.text.strip()
+        app.logger.info(f"Raw response: {raw[:200]}")  # Log first 200 chars
+
+        # Try multiple methods to extract JSON
+        
+        # Method 1: Find JSON between curly braces
+        json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except:
+                pass
+        
+        # Method 2: More aggressive - find from first { to last }
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end != -1 and end > start:
+            json_str = raw[start:end]
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                app.logger.error(f"JSON decode error: {e}\nString: {json_str}")
+        
+        # Method 3: Try to find JSON with newlines and nested braces
+        brace_count = 0
+        start_index = -1
+        for i, char in enumerate(raw):
+            if char == '{':
+                if brace_count == 0:
+                    start_index = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and start_index != -1:
+                    json_str = raw[start_index:i+1]
+                    try:
+                        return json.loads(json_str)
+                    except:
+                        continue
+        
+        # If all methods fail, log and return None
+        app.logger.error(f"Could not extract valid JSON from: {raw[:500]}")
+        return None
+
+    except Exception as e:
+        app.logger.error(f"Gemini API error: {str(e)}\nRaw: {raw[:500] if raw else 'N/A'}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -31,53 +95,38 @@ def validate_prompt():
             "level_up": False
         })
 
-    prompt = f"""
-You are the BrainPause Brain Pet, a warm and encouraging mindfulness companion.
-Evaluate the user's response and return JSON only. Do not give a good score if the response is negative or not comprehendable. Integrate the user's response into the message. 
+    prompt = f"""You are the BrainPause Brain Pet, a warm and encouraging mindfulness companion.
+Evaluate the user's response and return ONLY valid JSON, no other text.
 
 Prompt type: {prompt_type}
 User wrote: {user_response}
 
-Return JSON:
-{{
-  "score": <1-10>,
-  "message": "<1-2 sentence encouraging response>",
-  "level_up": <true/false>
-}}
+Rules:
+- Be specific to what they wrote
+- Do NOT give a high score for negative or meaningless responses. level_up should be assigned based 'False' in these cases.
+- Keep message 1-2 sentences
+
+Return EXACTLY this JSON format (no markdown, no explanations):
+{{"score": 5, "message": "Your specific response here", "level_up": false}}
+
+Score must be 1-10. Level_up should be true only if score >= 8.
 """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config={
-                "temperature": 0.7,
-                "max_output_tokens": 300,
-            }
-        )
+    result = generate_json(prompt)
 
-        raw = response.text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
-        result = json.loads(raw)
-
-        result["score"] = int(result.get("score", 5))
-        result["level_up"] = bool(result.get("level_up", False))
-        result["message"] = str(result.get("message", "Nice reflection! 💜"))
-
-        return jsonify(result)
-
-    except Exception as e:
-        app.logger.error("Gemini API error: %s", e)
+    if not result or not isinstance(result, dict):
         return jsonify({
             "score": 5,
-            "message": "Great work! 🌟",
+            "message": "Nice reflection — keep going 💜",
             "level_up": False
         })
+
+    # Ensure all required fields exist with proper types
+    return jsonify({
+        "score": int(result.get("score", 5)),
+        "message": str(result.get("message", "Nice reflection! 💜")),
+        "level_up": bool(result.get("level_up", False))
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -98,54 +147,56 @@ def scan_feed():
     sample = feed_items[:15]
     content_str = "\n---\n".join(str(s) for s in sample)
 
-    prompt = f"""
-You are a mindfulness feed analyst.
+    prompt = f"""You are a mindfulness feed analyst. Analyze this feed content for harmful patterns.
+Return ONLY valid JSON, no other text.
 
-Analyze this social media feed for harmful patterns like:
+Feed content:
+{content_str}
+
+Identify harmful patterns like:
 - comparison culture
-- anxiety-inducing news
+- anxiety
 - body image issues
 - FOMO
 - political stress
 
-Feed:
-{content_str}
+Return EXACTLY this JSON format:
+{{"concerning_count": 0, "categories": [], "recommendation": "Your recommendation here"}}
 
-Return JSON:
-{{
-  "concerning_count": <int>,
-  "categories": ["<type>", ...],
-  "recommendation": "<one sentence suggestion>"
-}}
+concerning_count: number of concerning items found (0-{len(sample)})
+categories: array of strings (use empty array if none)
+recommendation: one sentence advice
 """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config={
-                "temperature": 0.7,
-                "max_output_tokens": 300,
-            }
-        )
+    result = generate_json(prompt)
 
-        raw = response.text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
-        result = json.loads(raw)
-        return jsonify(result)
-
-    except Exception as e:
-        app.logger.error("scan-feed error: %s", e)
+    if not result or not isinstance(result, dict):
         return jsonify({
             "concerning_count": 0,
             "categories": [],
             "recommendation": "Your feed looks alright — stay mindful!"
         })
+
+    return jsonify({
+        "concerning_count": int(result.get("concerning_count", 0)),
+        "categories": list(result.get("categories", [])),
+        "recommendation": str(result.get("recommendation", "Stay mindful!"))
+    })
+
+
+# ---------------------------------------------------------------------------
+# POST /test-gemini (DEBUG endpoint)
+# ---------------------------------------------------------------------------
+@app.route("/test-gemini", methods=["POST"])
+def test_gemini():
+    """Test endpoint to debug Gemini responses"""
+    test_prompt = "Return exactly this JSON: {\"test\": \"success\", \"number\": 123}"
+    result = generate_json(test_prompt)
+    return jsonify({
+        "success": result is not None,
+        "result": result,
+        "raw_test": "Check logs for raw response"
+    })
 
 
 # ---------------------------------------------------------------------------
